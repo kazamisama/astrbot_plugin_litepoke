@@ -127,21 +127,6 @@ poke_user(user_id, times=1, emotion=None)
 
 ---
 
-## 和 astrbot_plugin_pokepro 的区别
-
-| 维度 | pokepro | litepoke |
-|---|---|---|
-| 代码量 | 1500+ 行 | ~280 行 |
-| 反戳 / 跟戳 / 定时 / 禁言 | ✅ | ❌ |
-| 表情包库 | 共享 meme_manager | **自带独立目录** |
-| 场景引导 | ❌ | ✅ |
-| 依赖 | 多 | 仅 AstrBot 核心 |
-| 定位 | 全功能 | **LLM 自主决策最小集** |
-
-如果只想要"AI 自己决定戳不戳"这件事，用 litepoke 就够了。
-
----
-
 ## 故障排查
 
 **插件加载失败：cannot import name 'MessageChain'**
