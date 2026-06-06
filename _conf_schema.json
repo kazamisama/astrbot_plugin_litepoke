@@ -1,0 +1,86 @@
+{
+    "global_cd": {
+        "description": "全局CD（秒）",
+        "hint": "任意两次戳一戳之间的最小间隔，用于防刷",
+        "type": "int",
+        "default": 5
+    },
+    "user_cd": {
+        "description": "同一用户被戳CD（秒）",
+        "hint": "同一个用户被戳之后，多久内不再戳他",
+        "type": "int",
+        "default": 60
+    },
+    "poke_max_times": {
+        "description": "aiocqhttp 单次最大戳次数",
+        "hint": "LLM 传入的 times 上限（仅对 aiocqhttp 平台生效）",
+        "type": "int",
+        "default": 3
+    },
+    "poke_interval": {
+        "description": "戳之间间隔（秒）",
+        "hint": "多次戳时，每次之间的间隔",
+        "type": "float",
+        "default": 0.5
+    },
+    "trigger_keywords": {
+        "description": "引导触发关键词",
+        "hint": "用户消息含其中任一关键词时，会注入引导提示让 LLM 考虑戳人。留空则不引导（仅靠 LLM 自主判断）",
+        "type": "list",
+        "default": [
+            "笨蛋",
+            "人机",
+            "机器人",
+            "bot",
+            "傻"
+        ]
+    },
+    "guide_cd": {
+        "description": "引导注入间隔（秒）",
+        "hint": "同一会话内，引导提示的最小注入间隔",
+        "type": "int",
+        "default": 30
+    },
+    "guide_prompt": {
+        "description": "引导提示词",
+        "hint": "命中关键词时附加到 system_prompt 的引导文本",
+        "type": "text",
+        "default": "[轻量戳一戳提示] 用户语气可能带有调侃/挑衅，你**可以**考虑调用 poke_user 工具戳回去，但请仅在符合人设的语境下使用，不要滥用，也注意遵守 CD 限制。"
+    },
+    "only_group": {
+        "description": "仅群聊生效",
+        "hint": "关闭后私聊也可以戳",
+        "type": "bool",
+        "default": true
+    },
+    "enable_meme_fallback": {
+        "description": "非aiocqhttp平台启用meme回退",
+        "hint": "在 webchat、telegram 等不支持真戳一戳的平台，用发送表情包来表达'戳'。依赖 meme_manager 插件",
+        "type": "bool",
+        "default": true
+    },
+    "meme_dir": {
+        "description": "meme表情包根目录",
+        "hint": "留空则使用 litepoke 自己的数据目录 <plugin_data>/astrbot_plugin_litepoke/memes。子目录名 = emotion 标签名（baka/sad/angry 等），里面放图片就行",
+        "type": "string",
+        "default": ""
+    },
+    "default_emotion": {
+        "description": "默认meme标签",
+        "hint": "没传 emotion 参数或标签不存在时使用的兜底标签",
+        "type": "string",
+        "default": "baka"
+    },
+    "fallback_face_id": {
+        "description": "meme不可用时的QQ face ID",
+        "hint": "meme目录为空时，发一个QQ原生face作为最后兜底。设为 0 关闭",
+        "type": "int",
+        "default": 0
+    },
+    "fallback_text": {
+        "description": "所有回退都不可用时的文字",
+        "hint": "当 meme 和 face 都不可用时，发一句文字表达'想戳你'",
+        "type": "string",
+        "default": "（戳了你一下）"
+    }
+}
