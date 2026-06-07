@@ -77,9 +77,13 @@ class PokeLog:
         day[sender] = day.get(sender, 0) + 1
 
     def prune_recent(self, now: float, window: int) -> None:
-        """裁剪 recent 窗口外的条目"""
+        """裁剪 recent 窗口外的条目
+
+        recent deque 里每个元素是 (sender, time) tuple
+        所以拿最老条目要 self.recent[0][1]（先取第一个 tuple，再取 time）
+        """
         cutoff = now - window
-        while self.recent and self.recent[1] < cutoff:
+        while self.recent and self.recent[0][1] < cutoff:
             self.recent.popleft()
 
     def prune_daily(self, keep_days: int) -> None:
