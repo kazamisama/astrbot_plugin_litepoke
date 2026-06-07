@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,27 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 # 表情文件后缀
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+
+
+@dataclass
+class GroupVibe:
+    """群内滑动窗口状态（轻量版群氛围追踪）
+
+    仅记录时间戳和最近一次事件的发送者，不解析内容。
+    跟戳决策时根据窗口内事件密度做概率调整。
+    """
+    recent_msgs: deque = field(default_factory=deque)    # 群内最近消息时间戳
+    recent_pokes: deque = field(default_factory=deque)   # 群内最近戳一戳时间戳
+    last_msg_sender: str = ""                            # 最近说话的人
+    last_poke_target: str = ""                           # 最近被戳的人
+
+    def prune(self, now: float, window: int) -> None:
+        """清理窗口外的过期条目"""
+        cutoff = now - window
+        while self.recent_msgs and self.recent_msgs[0] < cutoff:
+            self.recent_msgs.popleft()
+        while self.recent_pokes and self.recent_pokes[0] < cutoff:
+            self.recent_pokes.popleft()
 
 
 class LitePokePlugin(Star):
@@ -53,6 +75,10 @@ class LitePokePlugin(Star):
         self._meme_dir: Path | None = None
         self._meme_index: dict[str, list[Path]] = {}  # emotion -> [paths]
         self._meme_index_mtime: float = 0.0
+
+        # 群内滑动窗口（仅 aiocqhttp 群消息场景，用于跟戳决策）
+        # { group_id: GroupVibe }
+        self._vibe: dict[str, "GroupVibe"] = {}
 
     # ===================== 内部：CD 管理 =====================
 
@@ -343,10 +369,171 @@ class LitePokePlugin(Star):
         elif hasattr(request, "system_prompt"):
             request.system_prompt = guide_prompt
 
+    # ===================== 辅助：群内消息监听（维护滑动窗口） =====================
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def on_group_message(self, event):
+        """监听群内消息，维护 vibe 滑动窗口
+
+        每个群一条消息进来 → 一次 deque append + 一次 deque popleft（O(1)）。
+        不解析消息内容，只记时间戳和发送者。
+        """
+        gid = event.get_group_id()
+        if not gid:
+            return
+
+        vibe = self._vibe.get(gid)
+        if vibe is None:
+            vibe = GroupVibe()
+            self._vibe[gid] = vibe
+
+        now = time.time()
+        window = int(self.cfg.get("vibe_window", 60))
+        vibe.recent_msgs.append(now)
+        vibe.last_msg_sender = str(event.get_sender_id())
+        vibe.prune(now, window)
+
+    # ===================== 辅助：群内戳一戳监听 + 概率跟戳 =====================
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_group_poke(self, event):
+        """监听群内戳一戳事件，按概率跟着戳被戳的人
+
+        仅触发条件：
+        - aiocqhttp 平台
+        - 戳一戳事件（post_type=notice, notice_type=notify, sub_type=poke）
+        - 群内（group_id 非空）
+        - 是别人戳别人（不是自己发的，也不是戳 bot 自己）
+        - 按 follow_prob 概率触发
+        - 走 follow_cd 兜底，避免连续事件刷屏
+        """
+        if not isinstance(event, AiocqhttpMessageEvent):
+            return
+
+        if not self.cfg.get("follow_enabled", True):
+            return
+
+        # 解析戳一戳事件
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not isinstance(raw, dict):
+            return
+        if raw.get("post_type") != "notice":
+            return
+        if raw.get("notice_type") != "notify":
+            return
+        if raw.get("sub_type") != "poke":
+            return
+
+        self_id = raw.get("self_id", 0)
+        user_id = raw.get("user_id", 0)        # 戳人的
+        target_id = raw.get("target_id", 0)    # 被戳的
+        group_id = raw.get("group_id", 0)
+
+        # 只处理群内
+        if not group_id:
+            return
+
+        # 忽略机器人自己发的戳
+        if user_id == self_id:
+            return
+
+        # bot 自己被戳 → 不在这里处理，让 LLM 自主决定（poke_user / 表情回退）
+        if target_id == self_id:
+            return
+
+        # 概率判定
+        prob = float(self.cfg.get("follow_prob", 0.1))
+        prob = max(0.0, min(prob, 1.0))
+        if prob <= 0:
+            return
+
+        # CD 兜底：避免群内连续戳一戳事件时连续跟戳
+        follow_cd = float(self.cfg.get("follow_cd", 3))
+        if time.time() - self._last_any_poke < follow_cd:
+            return
+
+        # === vibe 决策：用群内滑动窗口调整概率 ===
+        adjusted_prob, reason = self._vibe_adjust(gid, target_id, prob)
+        if random.random() >= adjusted_prob:
+            return
+
+        # 跟戳
+        try:
+            await event.bot.group_poke(
+                group_id=int(group_id),
+                user_id=int(target_id),
+            )
+            self._last_any_poke = time.time()
+            # 记录到 vibe
+            vibe = self._vibe.get(gid)
+            if vibe is None:
+                vibe = GroupVibe()
+                self._vibe[gid] = vibe
+            window = int(self.cfg.get("vibe_window", 60))
+            vibe.recent_pokes.append(time.time())
+            vibe.last_poke_target = str(target_id)
+            vibe.prune(time.time(), window)
+            logger.debug(f"[litepoke] 跟戳 group={gid} target={target_id} reason={reason}")
+        except Exception as e:
+            logger.warning(f"[litepoke] 跟戳失败: {e}")
+
+    def _vibe_adjust(self, gid: str, target_id: int, base_prob: float) -> tuple[float, str]:
+        """根据群内滑动窗口调整跟戳概率
+
+        规则（都靠滑动窗口 + deque，O(1)）：
+        - 窗口内消息数 ≥ active_threshold → 群活跃，概率 ×1.5（封顶 1.0）
+        - 窗口内消息数 < quiet_threshold  → 群冷清，概率 ×0.3
+        - 窗口内已跟戳次数 ≥ max_in_window → 概率 = 0
+        - 被戳的人不是最近说话的人        → 概率 ×0.5
+
+        返回 (调整后概率, 决策原因) — reason 仅用于 debug 日志
+        """
+        vibe = self._vibe.get(gid)
+        if vibe is None:
+            return base_prob, "no_vibe"
+
+        window = int(self.cfg.get("vibe_window", 60))
+        now = time.time()
+        vibe.prune(now, window)
+
+        prob = base_prob
+        msg_count = len(vibe.recent_msgs)
+        poke_count = len(vibe.recent_pokes)
+        reason_parts: list[str] = []
+
+        active_threshold = int(self.cfg.get("vibe_active_threshold", 5))
+        quiet_threshold = int(self.cfg.get("vibe_quiet_threshold", 1))
+        max_in_window = int(self.cfg.get("vibe_max_in_window", 1))
+
+        # 规则 1：窗口内跟戳次数已达上限 → 跳过
+        if poke_count >= max_in_window:
+            return 0.0, f"max_in_window={poke_count}"
+
+        # 规则 2：群活跃 → 概率上调
+        if msg_count >= active_threshold:
+            prob = min(1.0, prob * 1.5)
+            reason_parts.append(f"active({msg_count})")
+
+        # 规则 3：群冷清 → 概率下调
+        if msg_count < quiet_threshold:
+            prob *= 0.3
+            reason_parts.append(f"quiet({msg_count})")
+
+        # 规则 4：被戳的人最近没说话 → 概率下调
+        target_str = str(target_id)
+        if vibe.last_msg_sender and target_str != vibe.last_msg_sender:
+            prob *= 0.5
+            reason_parts.append("target_silent")
+
+        return prob, ",".join(reason_parts) or "base"
+
     # ===================== 生命周期 =====================
 
     async def terminate(self):
         self._user_last_poke.clear()
         self._guide_last.clear()
         self._meme_index.clear()
-        logger.info("[litepoke] 插件已卸载，CD/meme 索引已清空")
+        self._vibe.clear()
+        logger.info("[litepoke] 插件已卸载，CD/meme/vibe 状态已清空")

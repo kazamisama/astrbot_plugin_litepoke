@@ -1,10 +1,12 @@
 # 轻量智能戳一戳（astrbot_plugin_litepoke）
 
-一个只做一件事的 AstrBot 插件：**把"戳一戳"的能力交给 LLM 自主判断**。
+一个把"戳一戳"能力做轻的 AstrBot 插件：
 
 - **aiocqhttp（QQ）平台**：发送真实的戳一戳通知
 - **其他平台**（webchat / telegram / 飞书 / 企业微信等）：用表情包 / QQ face / 文字模拟"戳"这个动作
-- 配套场景引导钩子：检测关键词 → 往 system_prompt 注入提示 → 让 LLM 考虑调用
+- **LLM 自主判断**：注册 `poke_user` 工具，模型自行决定何时戳
+- **场景引导钩子**：检测关键词 → 往 system_prompt 注入提示 → 让 LLM 考虑调用
+- **群内跟戳**（v1.1+）：监听群内戳一戳事件，按概率跟戳"别人戳别人"，基于滑动窗口的轻量群氛围决策
 
 代码刻意保持单文件、零依赖、易读易改。
 
@@ -15,11 +17,12 @@
 | 项 | 说明 |
 |---|---|
 | 平台 | aiocqhttp（真戳）+ 其他平台（表情回退） |
-| 调用方式 | LLM tool 自主调用 + 关键词场景引导 |
+| 调用方式 | LLM tool 自主调用 + 关键词场景引导 + **群内概率跟戳** |
 | 表情来源 | 插件自带数据目录，**不依赖** meme_manager |
-| 限频 | 全局CD + per-user CD + 引导CD |
+| 限频 | 全局CD + per-user CD + 引导CD + 跟戳CD |
 | 失败回退 | meme → QQ face → 文字，三级降级 |
-| 代码量 | 单文件约 280 行 |
+| 群氛围决策 | 60s 滑动窗口，O(1) 规则调概率，**不调 LLM** |
+| 代码量 | 单文件约 540 行 |
 
 ---
 
@@ -84,6 +87,13 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `default_emotion` | `baka` | 默认 emotion 标签 |
 | `fallback_face_id` | 0 | meme 不可用时的 QQ face ID；0=关闭 |
 | `fallback_text` | `（戳了你一下）` | 所有回退都失败时的文字 |
+| `follow_enabled` | true | 是否启用群内跟戳 |
+| `follow_prob` | 0.1 | 跟戳基础概率（0-1），vibe 调整后会变 |
+| `follow_cd` | 3 | 两次跟戳之间最小间隔（秒） |
+| `vibe_window` | 60 | 群内滑动窗口秒数 |
+| `vibe_active_threshold` | 5 | 窗口内消息数 ≥ 此值算群活跃，跟戳概率 ×1.5 |
+| `vibe_quiet_threshold` | 1 | 窗口内消息数 < 此值算群冷清，跟戳概率 ×0.3 |
+| `vibe_max_in_window` | 1 | 窗口内最多跟戳几次 |
 
 ---
 
@@ -125,6 +135,32 @@ poke_user(user_id, times=1, emotion=None)
 - 私聊（aiocqhttp）：戳好友，效果也不错
 - webchat / 其他：自动降级到表情包，推荐先放 5-10 个常用标签的表情
 
+### 4. 跟戳调优
+
+`follow_prob` 是基础概率，**实际跟戳概率会按 vibe 调整**：
+
+| 群内状态 | 调整后概率 |
+|---|---|
+| 60s 内消息数 ≥ 5（活跃） | base × 1.5（封顶 1.0） |
+| 60s 内消息数 < 1（冷清） | base × 0.3 |
+| 窗口内已跟戳 ≥ 1 | 0（不连戳） |
+| 被戳的人最近没说话 | base × 0.5 |
+
+**建议调参起点**：
+
+- 想要"偶尔跟一戳"：`follow_prob = 0.1`
+- 想要"频繁跟戳"：`follow_prob = 0.3`
+- 想要"基本不跟戳"：`follow_prob = 0.02`
+- 完全关掉跟戳：`follow_enabled = false`
+
+**调试方法**：AstrBot 日志里搜 `[litepoke]`，DEBUG 级别会打印 `跟戳 group=... target=... reason=active(7),target_silent` 这种日志。修改 `astrbot_config.yaml` 把 litepoke 的日志级别调到 DEBUG。
+
+### 5. 戳一戳事件和 LLM 上下文
+
+- 戳一戳是 OneBot 的 `notice/poke` 事件，**默认不进** LLM 的对话上下文
+- `poke_user` tool 是 LLM 在**用户发消息**时自主决定调用的工具
+- 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
+
 ---
 
 ## 故障排查
@@ -156,7 +192,11 @@ astrbot_plugin_litepoke/
 ├── main.py              # 全部逻辑，单文件
 ├── metadata.yaml        # 插件元数据
 ├── _conf_schema.json    # 配置 schema
-└── README.md            # 本文件
+├── README.md            # 本文件
+├── EMOTION_GUIDE.md     # 表情分类建议
+├── CHANGELOG.md         # 版本变更记录
+├── LICENSE              # AGPL-3.0
+└── .gitignore
 ```
 
 数据目录（运行时自动创建）：

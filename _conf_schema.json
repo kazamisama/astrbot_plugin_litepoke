@@ -82,5 +82,47 @@
         "hint": "当 meme 和 face 都不可用时，发一句文字表达'想戳你'",
         "type": "string",
         "default": "（戳了你一下）"
+    },
+    "follow_enabled": {
+        "description": "启用群内跟戳",
+        "hint": "关闭后不会跟着戳，只保留 LLM 自主调用 poke_user",
+        "type": "bool",
+        "default": true
+    },
+    "follow_prob": {
+        "description": "跟戳概率（0-1）",
+        "hint": "群里有人戳别人时，bot 跟戳的概率。0=从不跟戳，1=每次都跟戳。建议 0.05-0.2",
+        "type": "float",
+        "default": 0.1
+    },
+    "follow_cd": {
+        "description": "跟戳最小间隔（秒）",
+        "hint": "两次跟戳之间的最小间隔，防止群内短时间内连戳多人",
+        "type": "float",
+        "default": 3
+    },
+    "vibe_window": {
+        "description": "群内滑动窗口秒数",
+        "hint": "用于跟戳决策的滑动窗口长度。窗口外的事件会被清理",
+        "type": "int",
+        "default": 60
+    },
+    "vibe_active_threshold": {
+        "description": "群活跃阈值（窗口内消息数）",
+        "hint": "窗口内消息数 ≥ 此值算群活跃，跟戳概率上调到 ×1.5",
+        "type": "int",
+        "default": 5
+    },
+    "vibe_quiet_threshold": {
+        "description": "群冷清阈值（窗口内消息数）",
+        "hint": "窗口内消息数 < 此值算群冷清，跟戳概率下调到 ×0.3",
+        "type": "int",
+        "default": 1
+    },
+    "vibe_max_in_window": {
+        "description": "窗口内最大跟戳次数",
+        "hint": "滑动窗口内最多跟戳几次。超过则跳过这次跟戳",
+        "type": "int",
+        "default": 1
     }
 }

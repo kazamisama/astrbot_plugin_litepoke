@@ -2,6 +2,34 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.1.0] - 2026-06-07
+
+### Added
+- **群内戳一戳事件监听器 (`on_group_poke`)**：监听 aiocqhttp 群内戳一戳事件（`notice/notify/poke`），按概率跟戳"别人戳别人"
+- **`GroupVibe` 滑动窗口**：轻量版群氛围追踪，仅记录时间戳和最近一次事件的发送者（O(1) deque）
+- **`on_group_message` 钩子**：群内每条消息进来维护滑动窗口（消息数 / 说话人）
+- **vibe 概率调整规则**（`_vibe_adjust`）：
+  - 窗口内消息数 ≥ `vibe_active_threshold` → 跟戳概率 ×1.5（封顶 1.0）
+  - 窗口内消息数 < `vibe_quiet_threshold` → 跟戳概率 ×0.3
+  - 窗口内已跟戳次数 ≥ `vibe_max_in_window` → 概率 = 0
+  - 被戳的人不是最近说话的人 → 概率 ×0.5
+- **跟戳配置项**：
+  - `follow_enabled`（默认 true）
+  - `follow_prob`（默认 0.1，范围 0-1）
+  - `follow_cd`（默认 3 秒）
+  - `vibe_window`（默认 60 秒）
+  - `vibe_active_threshold`（默认 5 条）
+  - `vibe_quiet_threshold`（默认 1 条）
+  - `vibe_max_in_window`（默认 1 次）
+
+### Notes
+- vibe 决策**不调 LLM**，纯规则，O(1) 开销
+- 跟戳走 `_last_any_poke` 全局CD，与 `poke_user` 共享，不会冲突
+- 戳一戳事件是 `notice` 类型，**不会**进 LLM 对话上下文（默认 AstrBot 行为）
+- 跟戳决策 reason 写到 `logger.debug`，可在 AstrBot 日志里看 `reason=active(7),target_silent` 之类
+
+---
+
 ## [v1.0.0] - 2026-06-06
 
 ### 🎉 首个稳定版本
