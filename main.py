@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,75 @@ class GroupVibe:
             self.recent_pokes.popleft()
 
 
+@dataclass
+class PokeLog:
+    """戳一戳累积日志（短期 + 长期两个维度）
+
+    - recent: 60s 短期窗口的戳一戳事件。LLM 消费一次后清空。
+    - daily:  按日累计，按 sender_id 分人。跨重启保留。
+    """
+    recent: deque = field(default_factory=deque)        # [(sender, time)]
+    daily: dict[str, dict[str, int]] = field(default_factory=dict)  # date -> {sender: count}
+    last_saved: float = 0.0
+
+    def record(self, sender: str, now: float) -> None:
+        """记录一次戳一戳事件"""
+        self.recent.append((sender, now))
+        date_key = date.today().isoformat()
+        day = self.daily.setdefault(date_key, {})
+        day[sender] = day.get(sender, 0) + 1
+
+    def prune_recent(self, now: float, window: int) -> None:
+        """裁剪 recent 窗口外的条目"""
+        cutoff = now - window
+        while self.recent and self.recent[1] < cutoff:
+            self.recent.popleft()
+
+    def prune_daily(self, keep_days: int) -> None:
+        """删除 keep_days 之外的日期"""
+        if keep_days <= 0:
+            return
+        from datetime import timedelta
+        cutoff_date = (date.today() - timedelta(days=keep_days)).isoformat()
+        stale = [d for d in self.daily if d < cutoff_date]
+        for d in stale:
+            del self.daily[d]
+
+    def consume_recent(self) -> list[tuple[str, float]]:
+        """取出并清空 recent 队列（给 LLM 消费）"""
+        items = list(self.recent)
+        self.recent.clear()
+        return items
+
+    def top_sender_today(self) -> tuple[str, int] | None:
+        """今天戳 bot 最多的人"""
+        today = date.today().isoformat()
+        day = self.daily.get(today)
+        if not day:
+            return None
+        top = max(day, key=day.get)
+        return top, day[top]
+
+    def total_today(self) -> int:
+        today = date.today().isoformat()
+        return sum(self.daily.get(today, {}).values())
+
+    def to_dict(self) -> dict:
+        return {
+            "recent": [list(item) for item in self.recent],
+            "daily": self.daily,
+            "last_saved": self.last_saved,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PokeLog":
+        return cls(
+            recent=deque(tuple(item) for item in data.get("recent", [])),
+            daily={k: dict(v) for k, v in data.get("daily", {}).items()},
+            last_saved=float(data.get("last_saved", 0.0)),
+        )
+
+
 class LitePokePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -80,6 +151,13 @@ class LitePokePlugin(Star):
         # { group_id: GroupVibe }
         self._vibe: dict[str, "GroupVibe"] = {}
 
+        # 戳一戳累积日志（短期 + 长期，跨重启持久化）
+        self._poke_log: "PokeLog" = PokeLog()
+        self._poke_log_path: Path | None = None
+
+        # 启动时从 JSON 恢复 PokeLog
+        self._load_poke_log()
+
     # ===================== 内部：CD 管理 =====================
 
     def _cd_passed(self, scope: str, user_id: str) -> bool:
@@ -97,6 +175,75 @@ class LitePokePlugin(Star):
         now = time.time()
         self._last_any_poke = now
         self._user_last_poke[(scope, user_id)] = now
+
+    # ===================== 内部：PokeLog 持久化 =====================
+
+    def _resolve_poke_log_path(self) -> Path | None:
+        """PokeLog JSON 文件路径
+
+        1. 配置 poke_log_path 填了 → 用之
+        2. 没填 → 用 <plugin_data>/astrbot_plugin_litepoke/poke_log.json
+        """
+        if self._poke_log_path is not None:
+            return self._poke_log_path
+
+        configured = (self.cfg.get("poke_log_path", "") or "").strip()
+        if configured:
+            p = Path(configured).expanduser()
+            self._poke_log_path = p
+            return p
+
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+            data_root = Path(get_astrbot_plugin_data_path())
+            p = data_root / "astrbot_plugin_litepoke" / "poke_log.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            self._poke_log_path = p
+            return p
+        except Exception as e:
+            logger.warning(f"[litepoke] 推断 poke_log 路径失败: {e}")
+            return None
+
+    def _load_poke_log(self) -> None:
+        if not self.cfg.get("poke_log_persist", True):
+            return
+        p = self._resolve_poke_log_path()
+        if p is None or not p.is_file():
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            self._poke_log = PokeLog.from_dict(data)
+            logger.info(
+                f"[litepoke] PokeLog 已加载：recent={len(self._poke_log.recent)}, "
+                f"daily_keys={len(self._poke_log.daily)}"
+            )
+        except Exception as e:
+            logger.warning(f"[litepoke] 加载 PokeLog 失败: {e}")
+            self._poke_log = PokeLog()
+
+    def _save_poke_log(self) -> None:
+        if not self.cfg.get("poke_log_persist", True):
+            return
+        p = self._resolve_poke_log_path()
+        if p is None:
+            return
+        try:
+            self._poke_log.last_saved = time.time()
+            # 写盘前清理
+            keep_days = int(self.cfg.get("poke_log_daily_keep_days", 7))
+            self._poke_log.prune_daily(keep_days)
+            p.write_text(
+                json.dumps(self._poke_log.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"[litepoke] 保存 PokeLog 失败: {e}")
+
+    def _maybe_periodic_save(self) -> None:
+        """间隔写盘：每 poke_log_save_interval 秒写一次"""
+        interval = float(self.cfg.get("poke_log_save_interval", 60))
+        if time.time() - self._poke_log.last_saved >= interval:
+            self._save_poke_log()
 
     # ===================== 内部：meme 索引 =====================
 
@@ -286,9 +433,11 @@ class LitePokePlugin(Star):
         if is_aiocqhttp and not user_id.isdigit():
             return "戳一戳失败：aiocqhttp 平台下 user_id 必须是纯数字 QQ 号"
 
-        # CD 检查
+        # CD 检查：CD 期间不真正戳，但静默累积到 PokeLog
         if not self._cd_passed(scope, user_id):
-            return "戳一戳失败：CD 还没到，请稍候再试"
+            self._poke_log.record(user_id, time.time())
+            self._maybe_periodic_save()
+            return ""  # 空返回，不报错，让 LLM 自然处理
 
         # === 分支 A：aiocqhttp 真戳 ===
         if is_aiocqhttp and group_id:
@@ -338,7 +487,12 @@ class LitePokePlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event, request):
-        """在 LLM 请求前注入场景引导提示"""
+        """在 LLM 请求前注入场景引导 + PokeLog 统计
+
+        两个独立通道：
+        1. PokeLog 统计：总是尝试（如果有累积）。让 LLM 感知"刚被戳"或"今天被戳 N 次"。
+        2. 关键词引导：仅当用户消息命中 trigger_keywords 时执行。
+        """
         msg = event.message_str or ""
         if not msg:
             return
@@ -346,6 +500,15 @@ class LitePokePlugin(Star):
         if not event.get_group_id() and self.cfg.get("only_group", True):
             return
 
+        # === 通道 1：PokeLog 统计（总是）===
+        poke_log_block = self._build_poke_log_block()
+        if poke_log_block:
+            if hasattr(request, "system_prompt") and request.system_prompt:
+                request.system_prompt = request.system_prompt.rstrip() + "\n\n" + poke_log_block
+            elif hasattr(request, "system_prompt"):
+                request.system_prompt = poke_log_block
+
+        # === 通道 2：关键词引导 ===
         keywords = self.cfg.get("trigger_keywords", []) or []
         if not keywords:
             return
@@ -368,6 +531,52 @@ class LitePokePlugin(Star):
             request.system_prompt = request.system_prompt.rstrip() + "\n\n" + guide_prompt
         elif hasattr(request, "system_prompt"):
             request.system_prompt = guide_prompt
+
+    def _build_poke_log_block(self) -> str:
+        """构造 PokeLog 统计块（注入到 system_prompt）
+
+        只在 PokeLog 有累积时返回非空字符串。
+        消费后清空 recent（避免重复注入）。
+        """
+        window = int(self.cfg.get("poke_log_window", 60))
+        self._poke_log.prune_recent(time.time(), window)
+        keep_days = int(self.cfg.get("poke_log_daily_keep_days", 7))
+        self._poke_log.prune_daily(keep_days)
+
+        recent = self._poke_log.consume_recent()
+        total_today = self._poke_log.total_today()
+        top = self._poke_log.top_sender_today()
+
+        if not recent and total_today == 0:
+            return ""
+
+        from collections import Counter
+        recent_counter = Counter(s for s, _ in recent)
+
+        recent_text = ""
+        if recent:
+            top_in_window = recent_counter.most_common(1)[0]
+            recent_text = (
+                f"刚被戳了 {len(recent)} 次（{window}秒内），"
+                f"其中 {top_in_window[0]} 戳了 {top_in_window[1]} 次"
+            )
+        else:
+            recent_text = "近期没被戳"
+
+        today_text = ""
+        if total_today > 0:
+            if top:
+                today_text = (
+                    f"；今天总共被戳 {total_today} 次，"
+                    f"{top[0]} 是'主力'（戳了 {top[1]} 次）"
+                )
+            else:
+                today_text = f"；今天总共被戳 {total_today} 次"
+
+        return (
+            f"[戳一戳统计] {recent_text}{today_text}。"
+            f"如果觉得对方过界了，可以考虑用 poke_user 工具戳回去或发个文字吐槽。"
+        )
 
     # ===================== 辅助：群内消息监听（维护滑动窗口） =====================
 
@@ -441,6 +650,9 @@ class LitePokePlugin(Star):
 
         # bot 自己被戳 → 不在这里处理，让 LLM 自主决定（poke_user / 表情回退）
         if target_id == self_id:
+            # bot 自己被戳 → 累积到 PokeLog，等用户发消息时让 LLM 感知
+            self._poke_log.record(str(user_id), time.time())
+            self._maybe_periodic_save()
             return
 
         # 概率判定
@@ -532,8 +744,9 @@ class LitePokePlugin(Star):
     # ===================== 生命周期 =====================
 
     async def terminate(self):
+        self._save_poke_log()
         self._user_last_poke.clear()
         self._guide_last.clear()
         self._meme_index.clear()
         self._vibe.clear()
-        logger.info("[litepoke] 插件已卸载，CD/meme/vibe 状态已清空")
+        logger.info("[litepoke] 插件已卸载，CD/meme/vibe/PokeLog 状态已清空")

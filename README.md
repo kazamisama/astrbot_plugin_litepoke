@@ -94,6 +94,11 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `vibe_active_threshold` | 5 | 窗口内消息数 ≥ 此值算群活跃，跟戳概率 ×1.5 |
 | `vibe_quiet_threshold` | 1 | 窗口内消息数 < 此值算群冷清，跟戳概率 ×0.3 |
 | `vibe_max_in_window` | 1 | 窗口内最多跟戳几次 |
+| `poke_log_persist` | true | 是否持久化 PokeLog 到 JSON |
+| `poke_log_path` | 空 | PokeLog JSON 路径；留空用自带 |
+| `poke_log_window` | 60 | 短期窗口秒数（recent 队列） |
+| `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
+| `poke_log_save_interval` | 60 | 写盘间隔秒数 |
 
 ---
 
@@ -155,11 +160,41 @@ poke_user(user_id, times=1, emotion=None)
 
 **调试方法**：AstrBot 日志里搜 `[litepoke]`，DEBUG 级别会打印 `跟戳 group=... target=... reason=active(7),target_silent` 这种日志。修改 `astrbot_config.yaml` 把 litepoke 的日志级别调到 DEBUG。
 
-### 5. 戳一戳事件和 LLM 上下文
+### 5. PokeLog 累积日志（v1.2+）
+
+戳一戳是 `notice` 事件，**默认不进** LLM 对话上下文。litepoke 用 PokeLog 把戳一戳事件**累积**起来，等用户发消息时再通过 `on_llm_request` 注入统计。
+
+**两个维度**：
+
+| 字段 | 窗口 | 用途 |
+|---|---|---|
+| `recent` | 60s 短期 | "刚被戳了 N 次" |
+| `daily` | 24h 长期按 sender 分人 | "今天 A 戳了你 M 次" |
+
+**PokeLog 文件位置**：
+
+```text
+data/plugin_data/astrbot_plugin_litepoke/poke_log.json
+```
+
+**CD 期间被戳**：静默累积到 PokeLog，**不发任何消息**。等用户说话时 LLM 一次性看到。
+
+**示例 LLM 引导注入**：
+
+```text
+[戳一戳统计] 刚被戳了 3 次（60秒内），其中 alice 戳了 2 次；
+今天总共被戳 8 次，alice 是'主力'（戳了 5 次）。
+如果觉得对方过界了，可以考虑用 poke_user 工具戳回去或发个文字吐槽。
+```
+
+**消费机制**：LLM 看到 PokeLog 统计后，**recent 被清空**（防止下次重复注入）。`daily` 不清空，跨重启保留 7 天。
+
+### 6. 戳一戳事件和 LLM 上下文
 
 - 戳一戳是 OneBot 的 `notice/poke` 事件，**默认不进** LLM 的对话上下文
 - `poke_user` tool 是 LLM 在**用户发消息**时自主决定调用的工具
 - 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
+- PokeLog（v1.2+）通过 `on_llm_request` 钩子**延迟注入**统计块，让 LLM 后续响应时能感知
 
 ---
 

@@ -2,6 +2,53 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.2.0] - 2026-06-07
+
+### Added
+- **PokeLog 数据类**（双维度累积日志）：
+  - `recent: deque[(sender, time)]` — 短期窗口（默认 60s）的戳一戳事件
+  - `daily: dict[date, dict[sender, count]]` — 按日累计按 sender 分人
+  - 方法：`record` / `prune_recent` / `prune_daily` / `consume_recent` / `top_sender_today` / `total_today` / `to_dict` / `from_dict`
+- **PokeLog JSON 持久化**：
+  - 默认路径 `<plugin_data>/astrbot_plugin_litepoke/poke_log.json`
+  - 启动时 `_load_poke_log()` 恢复数据
+  - `terminate()` 写盘
+  - 间隔写盘：每 60s 自动保存
+- **延迟反馈机制**（CD 期间静默累积）：
+  - `poke_user` CD 期间不返回错误，改返回 `""` 静默累积到 PokeLog
+  - `on_group_poke` 检测到 bot 自己被戳 → 累积 PokeLog，**不调 LLM**、**不污染 conversation**
+- **`on_llm_request` 双通道注入**：
+  - 通道 1（PokeLog 统计）：总是执行。LLM 消费 recent 后清空
+  - 通道 2（关键词引导）：保持原行为
+- **`_build_poke_log_block` 方法**：构造"刚被戳 N 次 / 今天总共 M 次 / 主力是谁"自然语言块
+- **5 个新配置项**：
+  - `poke_log_persist`（默认 true）
+  - `poke_log_path`（默认空，用自带路径）
+  - `poke_log_window`（默认 60 秒）
+  - `poke_log_daily_keep_days`（默认 7 天）
+  - `poke_log_save_interval`（默认 60 秒）
+
+### Changed
+- `poke_user` CD 期间行为：从"返回错误"改为"静默累积 + 返回空串"
+- `on_group_poke` bot 自己被戳：从"直接 return"改为"累积 PokeLog"
+- `on_llm_request`：从"单通道（仅关键词）"改为"双通道（总是 PokeLog + 条件关键词）"
+- `terminate`：增加 `_save_poke_log()`
+
+### Design Principles
+- **零依赖**：不调 livingmemory，litepoke 自己存 JSON
+- **不污染 conversation**：通过 on_llm_request 注入 system_prompt，不是写历史消息
+- **延迟反馈**：戳一戳是 notice 事件，**默认不进** LLM 上下文；通过 PokeLog 累积 + 用户发消息时 LLM 消费，间接让 LLM 知道
+- **精确 vs 模糊**：精确数字用 PokeLog 自己存（count 是整数）；语义偏好才适合用 livingmemory
+
+### Notes
+- 一个活跃群今天被戳 50 次的 PokeLog 增量：~50 entries + JSON 写盘 < 1KB
+- 跨重启：数据保留最近 7 天（`poke_log_daily_keep_days` 可调）
+- LLM 看不到戳一戳事件本身（notice 事件），但能看到 PokeLog 累积后的统计
+
+---
+
+## [v1.1.0] - 2026-06-07
+
 ## [v1.1.0] - 2026-06-07
 
 ### Added

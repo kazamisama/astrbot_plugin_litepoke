@@ -124,5 +124,35 @@
         "hint": "滑动窗口内最多跟戳几次。超过则跳过这次跟戳",
         "type": "int",
         "default": 1
+    },
+    "poke_log_persist": {
+        "description": "持久化 PokeLog 到 JSON",
+        "hint": "关闭则 PokeLog 只在内存，重启即丢",
+        "type": "bool",
+        "default": true
+    },
+    "poke_log_path": {
+        "description": "PokeLog JSON 文件路径",
+        "hint": "留空使用默认 <plugin_data>/astrbot_plugin_litepoke/poke_log.json",
+        "type": "string",
+        "default": ""
+    },
+    "poke_log_window": {
+        "description": "戳一戳短期窗口（秒）",
+        "hint": "recent 队列保留多少秒内的事件。LLM 消费后清空",
+        "type": "int",
+        "default": 60
+    },
+    "poke_log_daily_keep_days": {
+        "description": "日累计保留天数",
+        "hint": "daily 字典保留多少天的数据。超过会被自动裁掉",
+        "type": "int",
+        "default": 7
+    },
+    "poke_log_save_interval": {
+        "description": "PokeLog 写盘间隔（秒）",
+        "hint": "每隔多少秒把内存里的 PokeLog 写一次盘",
+        "type": "int",
+        "default": 60
     }
 }
