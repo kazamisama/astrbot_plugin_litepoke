@@ -99,6 +99,10 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `poke_log_window` | 60 | 短期窗口秒数（recent 队列） |
 | `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
 | `poke_log_save_interval` | 60 | 写盘间隔秒数 |
+| `respond_poked_enabled` | true | 接管戳一戳响应开关 |
+| `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
+| `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
+| `respond_poked_prompt` | 见配置 | 被戳响应 prompt 模板 |
 
 ---
 
@@ -189,12 +193,54 @@ data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 
 **消费机制**：LLM 看到 PokeLog 统计后，**recent 被清空**（防止下次重复注入）。`daily` 不清空，跨重启保留 7 天。
 
-### 6. 戳一戳事件和 LLM 上下文
+### 6. 接管 chat_plus 的戳一戳响应（v1.3+）
+
+litepoke 现在可以**完全独立地**处理 bot 被戳的事件，**不依赖** chat_plus 的 `bot_only` 模式。
+
+**为什么需要这个**：
+
+- chat_plus 设为 `ignore` 模式时，戳一戳事件被作为空 Poke 组件加进 conversation，LLM 困惑
+- chat_plus 设为 `bot_only` 模式时，chat_plus 自己构造伪消息（litepoke 不需要这个）
+- **v1.3+ litepoke 自己接管**——bot 被戳时主动调 `event.request_llm()` 触发 LLM 回应
+
+**接管流程**：
+
+```text
+A 戳了 bot
+   ↓
+on_group_poke 触发
+   ↓ 累积 PokeLog（v1.2.0 保留行为）
+   ↓ 检查 respond_poked_enabled
+   ↓ 检查 respond_poked_cd（防刷屏）
+   ↓ 检查 respond_poked_prob（概率）
+   ↓ _build_poke_event_text 构造伪消息文本
+   ↓ _get_conversation 拿当前会话
+   ↓ event.request_llm(prompt, conversation) → yield
+   ↓
+LLM 立刻看到 poke_event 文本 + 决定回应
+```
+
+**默认 prompt**：
+
+```text
+[戳一戳事件]有人戳了你，发起者是 alice(ID:123456)。
+请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。
+```
+
+**调优建议**：
+
+- `respond_poked_prob = 1.0`（默认）— 100% 响应
+- `respond_poked_prob = 0.5` — 一半的戳一戳会响应
+- `respond_poked_cd = 10`（默认 10s）— 群友狂戳 bot 时 10 秒只回 1 次
+- `respond_poked_enabled = false` — 完全关掉接管，回到 v1.2.0 行为（只累积 PokeLog）
+
+### 7. 戳一戳事件和 LLM 上下文
 
 - 戳一戳是 OneBot 的 `notice/poke` 事件，**默认不进** LLM 的对话上下文
 - `poke_user` tool 是 LLM 在**用户发消息**时自主决定调用的工具
 - 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
 - PokeLog（v1.2+）通过 `on_llm_request` 钩子**延迟注入**统计块，让 LLM 后续响应时能感知
+- **接管响应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
 
 ---
 

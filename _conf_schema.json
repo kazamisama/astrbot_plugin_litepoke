@@ -154,5 +154,29 @@
         "hint": "每隔多少秒把内存里的 PokeLog 写一次盘",
         "type": "int",
         "default": 60
+    },
+    "respond_poked_enabled": {
+        "description": "接管戳一戳响应（v1.3+）",
+        "hint": "开启后，bot 被戳时会主动调一次 LLM 回应，不依赖 chat_plus 的 bot_only 模式",
+        "type": "bool",
+        "default": true
+    },
+    "respond_poked_prob": {
+        "description": "被戳响应概率（0-1）",
+        "hint": "bot 被戳时，主动调 LLM 回应的概率。0=不响应，1=每次都响应",
+        "type": "float",
+        "default": 1.0
+    },
+    "respond_poked_cd": {
+        "description": "被戳响应 CD（秒）",
+        "hint": "两次主动响应之间的最小间隔，防止群友狂戳 bot 时刷屏",
+        "type": "float",
+        "default": 10
+    },
+    "respond_poked_prompt": {
+        "description": "被戳响应 prompt 模板",
+        "hint": "可用占位符 {poke_event}，会替换成戳一戳事件描述",
+        "type": "string",
+        "default": "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。"
     }
 }

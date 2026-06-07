@@ -162,6 +162,60 @@ class LitePokePlugin(Star):
         # 启动时从 JSON 恢复 PokeLog
         self._load_poke_log()
 
+    # ===================== 内部：戳一戳事件文本构造（移植 chat_plus） =====================
+
+    @staticmethod
+    def _build_poke_event_text(poke_info: dict | None) -> str:
+        """构造可注入到 LLM 的戳一戳事件伪消息文本
+
+        移植自 astrbot_plugin_group_chat_plus 的 build_persistent_poke_event_text。
+        不依赖 chat_plus，独立运行。
+        """
+        if not poke_info or not isinstance(poke_info, dict):
+            return ""
+
+        sender_id = str(poke_info.get("sender_id", "") or "")
+        sender_name = (
+            str(poke_info.get("sender_name", "") or "").strip() or "未知用户"
+        )
+        target_id = str(poke_info.get("target_id", "") or "")
+        target_name = (
+            str(poke_info.get("target_name", "") or "").strip() or "未知用户"
+        )
+        is_poke_bot = bool(poke_info.get("is_poke_bot", False))
+
+        sender_text = f"{sender_name}(ID:{sender_id})" if sender_id else sender_name
+        target_text = f"{target_name}(ID:{target_id})" if target_id else target_name
+
+        if is_poke_bot:
+            if not sender_text:
+                return "[戳一戳事件]有人戳了你"
+            return f"[戳一戳事件]有人戳了你，发起者是{sender_text}"
+
+        if not sender_text and not target_text:
+            return "[戳一戳事件]发生了一次戳一戳互动"
+        if not sender_text:
+            return f"[戳一戳事件]这不是戳你的消息，有人戳了{target_text}"
+        if not target_text:
+            return f"[戳一戳事件]这不是戳你的消息，{sender_text}戳了别人"
+        return f"[戳一戳事件]这不是戳你的消息，{sender_text}戳了{target_text}"
+
+    async def _get_conversation(self, event: AiocqhttpMessageEvent):
+        """获取当前会话的 Conversation 对象（移植自 pokepro）
+
+        拿不到就返回 None，调用方需处理。
+        """
+        try:
+            umo = event.unified_msg_origin
+            conv_mgr = self.context.conversation_manager
+            cid = await conv_mgr.get_curr_conversation_id(umo)
+            if not cid:
+                cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
+            return await conv_mgr.get_conversation(umo, cid)
+        except Exception as e:
+            logger.warning(f"[litepoke] 获取 conversation 失败: {e}")
+            return None
+
     # ===================== 内部：CD 管理 =====================
 
     def _cd_passed(self, scope: str, user_id: str) -> bool:
@@ -652,11 +706,63 @@ class LitePokePlugin(Star):
         if user_id == self_id:
             return
 
-        # bot 自己被戳 → 不在这里处理，让 LLM 自主决定（poke_user / 表情回退）
+        # bot 自己被戳 → 累积 PokeLog + 主动调 LLM 回应（接管 chat_plus 的 bot_only 行为）
         if target_id == self_id:
-            # bot 自己被戳 → 累积到 PokeLog，等用户发消息时让 LLM 感知
             self._poke_log.record(str(user_id), time.time())
             self._maybe_periodic_save()
+
+            # 接管：主动触发 LLM 回应（v1.3.0+）
+            if not self.cfg.get("respond_poked_enabled", True):
+                return
+
+            # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
+            respond_cd = float(self.cfg.get("respond_poked_cd", 10))
+            if time.time() - self._last_any_poke < respond_cd:
+                return
+
+            # 概率控制
+            respond_prob = float(self.cfg.get("respond_poked_prob", 1.0))
+            respond_prob = max(0.0, min(respond_prob, 1.0))
+            if respond_prob <= 0:
+                return
+            if random.random() >= respond_prob:
+                return
+
+            # 构造伪消息文本
+            try:
+                sender_name = event.get_sender_name() or "未知用户"
+            except Exception:
+                sender_name = "未知用户"
+            poke_info = {
+                "sender_id": str(user_id),
+                "sender_name": sender_name,
+                "target_id": str(self_id),
+                "is_poke_bot": True,
+            }
+            poke_text = self._build_poke_event_text(poke_info)
+            if not poke_text:
+                return
+
+            # 取当前 conversation，调 LLM
+            try:
+                conv = await self._get_conversation(event)
+                if conv is None:
+                    logger.warning("[litepoke] 接管戳一戳：未拿到 conversation，跳过 LLM 调用")
+                    return
+
+                prompt_template = self.cfg.get(
+                    "respond_poked_prompt",
+                    "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
+                )
+                prompt = prompt_template.format(poke_event=poke_text)
+
+                self._last_any_poke = time.time()
+                logger.info(
+                    f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM"
+                )
+                yield event.request_llm(prompt=prompt, conversation=conv)
+            except Exception as e:
+                logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
             return
 
         # 概率判定

@@ -2,6 +2,41 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.0] - 2026-06-07
+
+### Added
+- **接管 chat_plus 的戳一戳响应**（v1.3+）：
+  - `_build_poke_event_text` 静态方法（移植自 chat_plus 的 `build_persistent_poke_event_text`）
+  - `_get_conversation` 异步方法（移植自 pokepro 的 `LLMService.get_conversation`）
+  - `on_group_poke` 的"bot 被戳"分支重写：累积 PokeLog + **主动调用 `event.request_llm()`** 让 LLM 立刻回应
+- **与 chat_plus 完全解耦**：
+  - 不再依赖 chat_plus 的 `bot_only` 模式构造伪消息
+  - 跟 chat_plus 设 `ignore` / `bot_only` / `all` 都兼容
+  - chat_plus 设为 `ignore` 时，litepoke 仍能主动响应戳一戳
+- **4 个新配置项**：
+  - `respond_poked_enabled`（默认 true）
+  - `respond_poked_prob`（默认 1.0，范围 0-1）
+  - `respond_poked_cd`（默认 10 秒）
+  - `respond_poked_prompt`（默认 prompt 模板）
+
+### Changed
+- `on_group_poke` 函数：从纯 `await` 改为 `async def` + `yield`（async generator），可以 yield `event.request_llm()` 响应
+- `on_group_poke` 的"bot 被戳"分支：从"PokeLog 累积 + return" 改为 "PokeLog 累积 + 主动调 LLM + yield 响应"
+- `metadata.yaml` version：v1.2.0 → v1.3.0
+
+### Design Principles
+- **零依赖**：依然不调任何外部插件，`_build_poke_event_text` 和 `_get_conversation` 都是**移植代码**到 litepoke 内部
+- **可降级**：CD 期间、概率未命中、conversation 拿不到 → 静默 return，不影响 PokeLog 累积
+- **防刷屏**：`respond_poked_cd` 默认 10 秒，群友狂戳 bot 不会烧 token
+- **跟 chat_plus 协同**：chat_plus 正常工作，litepoke 只**接管**戳一戳响应这一块
+
+### Notes
+- 每次 bot 被戳 → 1 次 LLM 调用（约 200-500 tokens）
+- 100% 概率（默认）+ 10s CD：群友狂戳 bot 时，10 秒内只回应 1 次
+- 日志会打印 `[litepoke] 接管戳一戳：group=... sender=... -> 主动调 LLM` 方便追踪
+
+---
+
 ## [v1.2.0] - 2026-06-07
 
 ### Added
