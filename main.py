@@ -743,13 +743,11 @@ class LitePokePlugin(Star):
             if not poke_text:
                 return
 
-            # 取当前 conversation，调 LLM
+            # 主动调 LLM：不要传 conversation 对象。
+            # AstrBot conversation 里可能包含历史 tool 消息；在 notice 事件中原样复用时，
+            # 兼容 OpenAI 的严格接口可能因 tool/tool_calls 配对上下文被裁剪或重组而报 400。
+            # 这里采用 group_chat_plus 的兼容写法：只传当前短 prompt + session_id。
             try:
-                conv = await self._get_conversation(event)
-                if conv is None:
-                    logger.warning("[litepoke] 接管戳一戳：未拿到 conversation，跳过 LLM 调用")
-                    return
-
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
@@ -760,7 +758,7 @@ class LitePokePlugin(Star):
                 logger.info(
                     f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM"
                 )
-                yield event.request_llm(prompt=prompt, conversation=conv)
+                yield event.request_llm(prompt=prompt, session_id=event.session_id)
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
             return
