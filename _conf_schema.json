@@ -171,19 +171,7 @@
         "description": "被戳响应 prompt 模板",
         "hint": "可用占位符 {poke_event}，会替换成戳一戳事件描述",
         "type": "string",
-        "default": "{poke_event}。请结合当前聊天上下文，用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。"
-    },
-    "respond_poked_context_enabled": {
-        "description": "被戳响应携带最近上下文",
-        "hint": "开启后，bot 被戳主动回应时会带上清洗后的最近 user/assistant 文本消息；不携带 tool 消息，避免 OpenAI 兼容接口 400",
-        "type": "bool",
-        "default": true
-    },
-    "respond_poked_context_messages": {
-        "description": "被戳响应最近上下文条数",
-        "hint": "最多携带多少条最近 user/assistant 文本消息。建议 4-8；过大可能增加 token 消耗",
-        "type": "int",
-        "default": 6
+        "default": "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。"
     },
     "respond_poked_write_context": {
         "description": "被戳事件写入上下文",

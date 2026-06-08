@@ -275,72 +275,6 @@ class LitePokePlugin(Star):
         normalized = text.replace(" ", "").lower()
         return not text or normalized in {"[poke:poke]", "[componenttype.poke]"}
 
-    async def _build_recent_contexts(
-        self,
-        event: AiocqhttpMessageEvent,
-        exclude_texts: set[str] | None = None,
-    ) -> list[dict[str, str]]:
-        """构造主动戳一戳回应的安全最近上下文。
-
-        不传原始 conversation，避免 tool/tool_calls 历史配对问题；只保留最近 user/assistant
-        的纯文本消息，跳过 tool、_checkpoint、assistant tool_calls、think 等非文本内容。
-        exclude_texts 用于即时主动回应：戳一戳事件已经作为 prompt 传入时，避免同一事件又从
-        conversation contexts 中出现一次，让模型误判成被戳了两次。
-        """
-        if not self.cfg.get("respond_poked_context_enabled", True):
-            return []
-
-        exclude_texts = exclude_texts or set()
-        limit = int(self.cfg.get("respond_poked_context_messages", 6) or 0)
-        if limit <= 0:
-            return []
-        limit = max(1, min(limit, 20))
-
-        conv = await self._get_conversation(event)
-        if conv is None:
-            return []
-
-        raw_messages = getattr(conv, "content", None) or getattr(conv, "history", None) or []
-        if isinstance(raw_messages, str):
-            try:
-                raw_messages = json.loads(raw_messages)
-            except Exception:
-                raw_messages = []
-        if not isinstance(raw_messages, list):
-            return []
-
-        contexts: list[dict[str, str]] = []
-        skipped_excluded = 0
-        for msg in reversed(raw_messages):
-            if len(contexts) >= limit:
-                break
-            if not isinstance(msg, dict):
-                continue
-
-            role = msg.get("role")
-            if role not in {"user", "assistant"}:
-                continue
-            if msg.get("tool_calls"):
-                continue
-
-            text = self._extract_text_from_content(msg.get("content"))
-            if not text:
-                continue
-            if text in exclude_texts:
-                skipped_excluded += 1
-                continue
-            if len(text) > 800:
-                text = text[:800].rstrip() + "..."
-            contexts.append({"role": role, "content": text})
-
-        contexts.reverse()
-        if contexts or skipped_excluded:
-            logger.debug(
-                f"[litepoke] 已构造安全最近上下文 messages={len(contexts)} "
-                f"skipped_excluded={skipped_excluded}"
-            )
-        return contexts
-
     def _get_llm_tooling(self) -> tuple[Any | None, Any | None]:
         """获取当前 AstrBot LLM 工具管理器和 ToolSet。
 
@@ -1024,9 +958,10 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 主动调 LLM：不要传 conversation 对象。
+            # 主动调 LLM：不要传 conversation/contexts。
             # AstrBot conversation 里可能包含历史 tool 消息；在 notice 事件中原样复用时，
             # 兼容 OpenAI 的严格接口可能因 tool/tool_calls 配对上下文被裁剪或重组而报 400。
+            # 当前 poke_event 只通过 prompt 传入一次；写入 conversation 的事件留给后续普通对话使用。
             # 但仅传短 prompt 会丢失人格，因此单独传当前 persona 的 system_prompt。
             try:
                 prompt_template = self.cfg.get(
@@ -1035,7 +970,6 @@ class LitePokePlugin(Star):
                 )
                 prompt = prompt_template.format(poke_event=poke_text)
                 system_prompt = await self._get_current_persona_prompt(event)
-                contexts = await self._build_recent_contexts(event, exclude_texts={poke_text})
                 func_tools_mgr, tool_set = self._get_llm_tooling()
 
                 self._last_any_poke = time.time()
@@ -1046,7 +980,6 @@ class LitePokePlugin(Star):
                     prompt=prompt,
                     session_id=event.session_id,
                     system_prompt=system_prompt,
-                    contexts=contexts,
                     func_tool_manager=func_tools_mgr,
                     tool_set=tool_set,
                 )

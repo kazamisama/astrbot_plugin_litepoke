@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.10] - 2026-06-08
+
+### Removed
+- 删除被戳主动回应时手动读取并拼接最近 user/assistant 文本上下文的逻辑。
+- 删除配置项 `respond_poked_context_enabled` / `respond_poked_context_messages`。
+
+### Changed
+- bot 被戳的即时主动回应现在只向 LLM 传入 `poke_event` prompt、当前 persona `system_prompt` 和工具集；写入 conversation 的戳一戳事件仅供后续普通对话使用。
+- `respond_poked_prompt` 默认文案不再要求“结合当前聊天上下文”。
+- `metadata.yaml` version：v1.3.9 → v1.3.10
+
+---
 ## [v1.3.9] - 2026-06-08
 
 ### Fixed

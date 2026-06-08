@@ -102,8 +102,6 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
 | `respond_poked_prompt` | 见配置 | 被戳响应 prompt 模板 |
-| `respond_poked_context_enabled` | true | 被戳响应是否携带清洗后的最近上下文 |
-| `respond_poked_context_messages` | 6 | 被戳响应携带最近 user/assistant 文本条数 |
 | `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation |
 
 ---
@@ -222,18 +220,17 @@ on_group_poke 触发
    ↓ 检查 respond_poked_cd（仅控制是否主动调 LLM，防刷屏）
    ↓ 检查 respond_poked_prob（概率）
    ↓ 获取当前 persona system_prompt
-   ↓ 读取并清洗最近 user/assistant 文本上下文
    ↓ 获取全局 LLM 工具集（确保 poke_user 可用）
-   ↓ event.request_llm(prompt, session_id, system_prompt, contexts, func_tool_manager, tool_set) → yield
+   ↓ event.request_llm(prompt, session_id, system_prompt, func_tool_manager, tool_set) → yield
    ↓
-LLM 结合人格、最近上下文和 poke_event 文本决定回应
+LLM 结合人格和 poke_event 文本决定回应
 ```
 
 **默认 prompt**：
 
 ```text
 [戳一戳事件]有人戳了你，发起者是 alice(ID:123456)。
-请结合当前聊天上下文，用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。
+请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。
 ```
 
 **调优建议**：
@@ -251,7 +248,7 @@ LLM 结合人格、最近上下文和 poke_event 文本决定回应
 - PokeLog（v1.2+）通过 `on_llm_request` 钩子**延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
 - **接管响应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
 - **写入上下文**（v1.3.4+）：开启 `respond_poked_write_context` 后，bot 被戳的 notice 会作为一条纯文本 `user` 消息写入官方 conversation，后续普通对话也能自然感知这次戳一戳事件
-- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`，主动回应时也不会把原始 conversation 整包传给 LLM，只传清洗后的最近文本上下文
+- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`，主动回应时也不会把原始 conversation 或额外拼接的历史消息传给 LLM；当前戳一戳事件只通过 prompt 传入一次，写入 conversation 的记录留给后续普通对话使用
 
 ---
 
