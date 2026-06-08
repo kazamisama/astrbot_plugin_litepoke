@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.4] - 2026-06-08
+
+### Added
+- 新增 `respond_poked_write_context`（默认 true）：bot 被戳的 notice 事件会作为一条纯文本 `user` 消息写入官方 conversation。
+
+### Changed
+- 主动戳一戳事件从“只作为本次 prompt/contexts 使用”改为“写入上下文历史”，后续普通对话、上下文构造和记忆链路都能自然感知该事件。
+- 写入内容只包含纯文本事件描述和轻量 metadata，不写入 `tool` / `tool_calls`，避免污染 OpenAI 工具调用链。
+- `metadata.yaml` version：v1.3.3 → v1.3.4
+
+---
+
 ## [v1.3.3] - 2026-06-08
 
 ### Fixed

@@ -190,5 +190,11 @@
         "hint": "最多携带多少条最近 user/assistant 文本消息。建议 4-8；过大可能增加 token 消耗",
         "type": "int",
         "default": 6
+    },
+    "respond_poked_write_context": {
+        "description": "被戳事件写入上下文",
+        "hint": "开启后，bot 被戳的 notice 事件会作为一条纯文本 user 消息写入官方 conversation，后续对话能自然感知该事件；不写入 tool/tool_calls",
+        "type": "bool",
+        "default": true
     }
 }

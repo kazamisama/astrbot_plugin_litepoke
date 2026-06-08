@@ -200,21 +200,27 @@ class LitePokePlugin(Star):
             return f"[戳一戳事件]这不是戳你的消息，{sender_text}戳了别人"
         return f"[戳一戳事件]这不是戳你的消息，{sender_text}戳了{target_text}"
 
-    async def _get_conversation(self, event: AiocqhttpMessageEvent):
-        """获取当前会话的 Conversation 对象（移植自 pokepro）
-
-        拿不到就返回 None，调用方需处理。
-        """
+    async def _get_conversation_with_id(self, event: AiocqhttpMessageEvent):
+        """获取当前会话 ID 和 Conversation 对象。"""
         try:
             umo = event.unified_msg_origin
             conv_mgr = self.context.conversation_manager
             cid = await conv_mgr.get_curr_conversation_id(umo)
             if not cid:
                 cid = await conv_mgr.new_conversation(umo, event.get_platform_id())
-            return await conv_mgr.get_conversation(umo, cid)
+            conv = await conv_mgr.get_conversation(umo, cid)
+            return cid, conv
         except Exception as e:
             logger.warning(f"[litepoke] 获取 conversation 失败: {e}")
-            return None
+            return None, None
+
+    async def _get_conversation(self, event: AiocqhttpMessageEvent):
+        """获取当前会话的 Conversation 对象（移植自 pokepro）
+
+        拿不到就返回 None，调用方需处理。
+        """
+        _, conv = await self._get_conversation_with_id(event)
+        return conv
 
     async def _get_current_persona_prompt(self, event: AiocqhttpMessageEvent) -> str:
         """获取当前会话的人格 system prompt。
@@ -277,6 +283,11 @@ class LitePokePlugin(Star):
             return []
 
         raw_messages = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if isinstance(raw_messages, str):
+            try:
+                raw_messages = json.loads(raw_messages)
+            except Exception:
+                raw_messages = []
         if not isinstance(raw_messages, list):
             return []
 
@@ -304,6 +315,75 @@ class LitePokePlugin(Star):
         if contexts:
             logger.debug(f"[litepoke] 已构造安全最近上下文 messages={len(contexts)}")
         return contexts
+
+    async def _append_poke_event_to_conversation(
+        self,
+        event: AiocqhttpMessageEvent,
+        poke_text: str,
+    ) -> bool:
+        """把戳一戳 notice 写入官方 conversation，作为后续上下文的一部分。
+
+        只写入一条纯文本 user 消息，不写 tool/tool_calls，避免污染工具调用链。
+        """
+        if not self.cfg.get("respond_poked_write_context", True):
+            return False
+        if not poke_text:
+            return False
+
+        cid, conv = await self._get_conversation_with_id(event)
+        if not cid or conv is None:
+            return False
+
+        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if isinstance(raw_history, str):
+            try:
+                history = json.loads(raw_history)
+            except Exception:
+                history = []
+        elif isinstance(raw_history, list):
+            history = list(raw_history)
+        else:
+            history = []
+
+        event_message = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": poke_text,
+                }
+            ],
+            "metadata": {
+                "source": "litepoke",
+                "event_type": "poke",
+                "timestamp": time.time(),
+            },
+        }
+
+        # 避免同一 notice 分支异常重入时重复写入完全相同的最后一条事件。
+        if history:
+            last = history[-1]
+            if isinstance(last, dict) and self._extract_text_from_content(last.get("content")) == poke_text:
+                return True
+
+        history.append(event_message)
+
+        conv_mgr = self.context.conversation_manager
+        try:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
+            logger.debug(f"[litepoke] 已写入戳一戳事件到 conversation id={cid}")
+            return True
+        except TypeError:
+            try:
+                await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
+                logger.debug(f"[litepoke] 已写入戳一戳事件到 conversation id={cid}")
+                return True
+            except Exception as e:
+                logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
+                return False
+        except Exception as e:
+            logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
+            return False
 
     # ===================== 内部：CD 管理 =====================
 
@@ -831,6 +911,7 @@ class LitePokePlugin(Star):
             poke_text = self._build_poke_event_text(poke_info)
             if not poke_text:
                 return
+            await self._append_poke_event_to_conversation(event, poke_text)
 
             # 主动调 LLM：不要传 conversation 对象。
             # AstrBot conversation 里可能包含历史 tool 消息；在 notice 事件中原样复用时，
