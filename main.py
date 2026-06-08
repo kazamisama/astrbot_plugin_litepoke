@@ -393,20 +393,49 @@ class LitePokePlugin(Star):
         # 避免同一 notice 分支异常重入时重复写入完全相同的最后一条事件。
         if history:
             last = history[-1]
-            if isinstance(last, dict) and self._extract_text_from_content(last.get("content")) == poke_text:
+            if (
+                isinstance(last, dict)
+                and self._extract_text_from_content(last.get("content")) == poke_text
+            ):
                 return True
 
-        history.append(event_message)
+        # AstrBot 可能已先把原始 ComponentType.Poke 作为一条空 user 消息写入 history。
+        # 这里优先把最近的原始空 Poke 消息规范化为可读文本，避免一次戳被模型看成两条。
+        replaced = False
+        for idx in range(len(history) - 1, max(-1, len(history) - 4), -1):
+            msg = history[idx]
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "user":
+                continue
+            metadata = msg.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("source") == "litepoke":
+                continue
+
+            text = self._extract_text_from_content(msg.get("content"))
+            normalized = text.replace(" ", "").lower()
+            is_raw_poke_marker = normalized in {"[poke:poke]", "[componenttype.poke]"}
+            if text and not is_raw_poke_marker:
+                continue
+
+            history[idx] = event_message
+            replaced = True
+            break
+
+        if not replaced:
+            history.append(event_message)
 
         conv_mgr = self.context.conversation_manager
         try:
             await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
-            logger.debug(f"[litepoke] 已写入戳一戳事件到 conversation id={cid}")
+            action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
+            logger.debug(f"[litepoke] 已{action}到 conversation id={cid}")
             return True
         except TypeError:
             try:
                 await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
-                logger.debug(f"[litepoke] 已写入戳一戳事件到 conversation id={cid}")
+                action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
+                logger.debug(f"[litepoke] 已{action}到 conversation id={cid}")
                 return True
             except Exception as e:
                 logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")

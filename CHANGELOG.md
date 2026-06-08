@@ -2,6 +2,17 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.7] - 2026-06-08
+
+### Fixed
+- 写入戳一戳事件到 conversation 时，优先替换最近由 AstrBot 原始 Poke 组件产生的空 `user` 消息；找不到可替换项时才追加新消息。
+- 避免一次戳一戳在上下文中表现为“原始空 Poke 消息 + litepoke 文本事件”两条记录，导致模型误判被戳了两次。
+
+### Changed
+- `metadata.yaml` version：v1.3.6 → v1.3.7
+
+---
+
 ## [v1.3.6] - 2026-06-08
 
 ### Fixed
