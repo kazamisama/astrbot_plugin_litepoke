@@ -260,6 +260,21 @@ class LitePokePlugin(Star):
             return "\n".join(parts).strip()
         return ""
 
+    def _is_raw_poke_history_message(self, msg: Any) -> bool:
+        """判断 history 中由 AstrBot 原始 Poke 组件产生的空/标记 user 消息。"""
+        if not isinstance(msg, dict):
+            return False
+        if msg.get("role") != "user":
+            return False
+
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("source") == "litepoke":
+            return False
+
+        text = self._extract_text_from_content(msg.get("content"))
+        normalized = text.replace(" ", "").lower()
+        return not text or normalized in {"[poke:poke]", "[componenttype.poke]"}
+
     async def _build_recent_contexts(self, event: AiocqhttpMessageEvent) -> list[dict[str, str]]:
         """构造主动戳一戳回应的安全最近上下文。
 
@@ -403,19 +418,7 @@ class LitePokePlugin(Star):
         # 这里优先把最近的原始空 Poke 消息规范化为可读文本，避免一次戳被模型看成两条。
         replaced = False
         for idx in range(len(history) - 1, max(-1, len(history) - 4), -1):
-            msg = history[idx]
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("role") != "user":
-                continue
-            metadata = msg.get("metadata")
-            if isinstance(metadata, dict) and metadata.get("source") == "litepoke":
-                continue
-
-            text = self._extract_text_from_content(msg.get("content"))
-            normalized = text.replace(" ", "").lower()
-            is_raw_poke_marker = normalized in {"[poke:poke]", "[componenttype.poke]"}
-            if text and not is_raw_poke_marker:
+            if not self._is_raw_poke_history_message(history[idx]):
                 continue
 
             history[idx] = event_message
@@ -443,6 +446,54 @@ class LitePokePlugin(Star):
         except Exception as e:
             logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
             return False
+
+    async def _drop_recent_raw_poke_from_conversation(
+        self,
+        event: AiocqhttpMessageEvent,
+        *,
+        reason: str = "",
+    ) -> bool:
+        """删除最近由 AstrBot 原始 Poke 组件写入的空/标记 user 消息。
+
+        bot 自己调用 poke_user 时，aiocqhttp 可能回送一条 self poke notice，
+        AstrBot 又会把它写进当前 conversation。这里把这条 outgoing 动作清掉，
+        避免下一轮模型把 bot 的动作误读成新的用户输入。
+        """
+        cid, conv = await self._get_conversation_with_id(event)
+        if not cid or conv is None:
+            return False
+
+        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if isinstance(raw_history, str):
+            try:
+                history = json.loads(raw_history)
+            except Exception:
+                history = []
+        elif isinstance(raw_history, list):
+            history = list(raw_history)
+        else:
+            history = []
+
+        removed = False
+        for idx in range(len(history) - 1, max(-1, len(history) - 4), -1):
+            if not self._is_raw_poke_history_message(history[idx]):
+                continue
+            del history[idx]
+            removed = True
+            break
+
+        if not removed:
+            return False
+
+        conv_mgr = self.context.conversation_manager
+        try:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
+        except TypeError:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
+
+        suffix = f" reason={reason}" if reason else ""
+        logger.debug(f"[litepoke] 已删除原始 outgoing 戳一戳 history id={cid}{suffix}")
+        return True
 
     # ===================== 内部：状态记录 =====================
 
@@ -893,9 +944,6 @@ class LitePokePlugin(Star):
         if not isinstance(event, AiocqhttpMessageEvent):
             return
 
-        if not self.cfg.get("follow_enabled", True):
-            return
-
         # 解析戳一戳事件
         raw = getattr(event.message_obj, "raw_message", None)
         if not isinstance(raw, dict):
@@ -907,22 +955,24 @@ class LitePokePlugin(Star):
         if raw.get("sub_type") != "poke":
             return
 
-        self_id = raw.get("self_id", 0)
-        user_id = raw.get("user_id", 0)        # 戳人的
-        target_id = raw.get("target_id", 0)    # 被戳的
-        group_id = raw.get("group_id", 0)
+        self_id = str(raw.get("self_id", "") or "")
+        user_id = str(raw.get("user_id", "") or "")        # 戳人的
+        target_id = str(raw.get("target_id", "") or "")    # 被戳的
+        group_id = str(raw.get("group_id", "") or "")
 
         # 只处理群内
         if not group_id:
             return
-        gid = str(group_id)
+        gid = group_id
 
-        # 忽略机器人自己发的戳
-        if user_id == self_id:
+        # bot 自己发出的戳一戳是 outgoing 动作，不应作为新的 user 输入进入上下文。
+        # 注意：这里必须早于 follow_enabled；follow_enabled 只控制概率跟戳，不控制清理 outgoing notice。
+        if user_id and self_id and user_id == self_id:
+            await self._drop_recent_raw_poke_from_conversation(event, reason="bot_outgoing_poke")
             return
 
         # bot 自己被戳 → 累积 PokeLog + 写入上下文 + 可选主动调 LLM 回应
-        if target_id == self_id:
+        if target_id and self_id and target_id == self_id:
             self._poke_log.record(str(user_id), time.time())
             self._maybe_periodic_save()
 
@@ -988,6 +1038,9 @@ class LitePokePlugin(Star):
                 )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
+            return
+
+        if not self.cfg.get("follow_enabled", True):
             return
 
         # 概率判定

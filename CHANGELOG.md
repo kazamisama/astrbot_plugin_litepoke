@@ -2,6 +2,17 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.8] - 2026-06-08
+
+### Fixed
+- 机器人自己通过 `poke_user` 或概率跟戳发出的 outgoing 戳一戳 notice 不再作为新的 `user` 输入留在 conversation 中，避免下一轮模型误判为“用户刚刚戳了 bot”。
+- 戳一戳 notice 的 `self_id` / `user_id` / `target_id` / `group_id` 统一转为字符串后再比较，避免平台返回 int/string 混用导致方向判断失效。
+
+### Changed
+- `follow_enabled` 现在只控制“别人戳别人时概率跟戳”，不再影响“bot 被戳写入上下文”和“清理 bot outgoing 原始 Poke history”。
+- `metadata.yaml` version：v1.3.7 → v1.3.8
+
+---
 ## [v1.3.7] - 2026-06-08
 
 ### Fixed
