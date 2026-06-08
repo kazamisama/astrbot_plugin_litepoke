@@ -2,6 +2,22 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.3] - 2026-06-08
+
+### Fixed
+- 修复 v1.3.2 主动戳一戳回应虽然保留人格，但仍缺少最近聊天上下文，导致回应和当前话题联动不足、显得像独立触发器的问题。
+- 主动戳一戳回应现在会读取当前 conversation，但只提取最近 user/assistant 的纯文本消息作为 `contexts`，过滤 `tool`、`tool_calls`、`_checkpoint`、think 等内容，避免重新触发 OpenAI 兼容接口的 tool 配对 400。
+
+### Added
+- 新增 `respond_poked_context_enabled`：控制被戳主动回应是否携带清洗后的最近上下文，默认 true。
+- 新增 `respond_poked_context_messages`：控制携带最近上下文条数，默认 6。
+
+### Changed
+- `metadata.yaml` version：v1.3.2 → v1.3.3
+- `respond_poked_prompt` 默认文案增加“结合当前聊天上下文”。
+
+---
+
 ## [v1.3.2] - 2026-06-08
 
 ### Fixed

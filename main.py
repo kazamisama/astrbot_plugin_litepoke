@@ -240,6 +240,71 @@ class LitePokePlugin(Star):
             logger.warning(f"[litepoke] 获取当前人格 prompt 失败: {e}")
             return ""
 
+    @staticmethod
+    def _extract_text_from_content(content: Any) -> str:
+        """从 AstrBot/OpenAI 风格 content 中提取可读文本。"""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") != "text":
+                    continue
+                text = str(item.get("text", "") or "").strip()
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+        return ""
+
+    async def _build_recent_contexts(self, event: AiocqhttpMessageEvent) -> list[dict[str, str]]:
+        """构造主动戳一戳回应的安全最近上下文。
+
+        不传原始 conversation，避免 tool/tool_calls 历史配对问题；只保留最近 user/assistant
+        的纯文本消息，跳过 tool、_checkpoint、assistant tool_calls、think 等非文本内容。
+        """
+        if not self.cfg.get("respond_poked_context_enabled", True):
+            return []
+
+        limit = int(self.cfg.get("respond_poked_context_messages", 6) or 0)
+        if limit <= 0:
+            return []
+        limit = max(1, min(limit, 20))
+
+        conv = await self._get_conversation(event)
+        if conv is None:
+            return []
+
+        raw_messages = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if not isinstance(raw_messages, list):
+            return []
+
+        contexts: list[dict[str, str]] = []
+        for msg in reversed(raw_messages):
+            if len(contexts) >= limit:
+                break
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if msg.get("tool_calls"):
+                continue
+
+            text = self._extract_text_from_content(msg.get("content"))
+            if not text:
+                continue
+            if len(text) > 800:
+                text = text[:800].rstrip() + "..."
+            contexts.append({"role": role, "content": text})
+
+        contexts.reverse()
+        if contexts:
+            logger.debug(f"[litepoke] 已构造安全最近上下文 messages={len(contexts)}")
+        return contexts
+
     # ===================== 内部：CD 管理 =====================
 
     def _cd_passed(self, scope: str, user_id: str) -> bool:
@@ -778,6 +843,7 @@ class LitePokePlugin(Star):
                 )
                 prompt = prompt_template.format(poke_event=poke_text)
                 system_prompt = await self._get_current_persona_prompt(event)
+                contexts = await self._build_recent_contexts(event)
 
                 self._last_any_poke = time.time()
                 logger.info(
@@ -787,6 +853,7 @@ class LitePokePlugin(Star):
                     prompt=prompt,
                     session_id=event.session_id,
                     system_prompt=system_prompt,
+                    contexts=contexts,
                 )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
