@@ -215,15 +215,16 @@ litepoke 现在可以**完全独立地**处理 bot 被戳的事件，**不依赖
 A 戳了 bot
    ↓
 on_group_poke 触发
-   ↓ 累积 PokeLog（v1.2.0 保留行为）
-   ↓ 检查 respond_poked_enabled
-   ↓ 检查 respond_poked_cd（防刷屏）
-   ↓ 检查 respond_poked_prob（概率）
+   ↓ 累积 PokeLog（仅统计，默认不注入提示词）
    ↓ _build_poke_event_text 构造戳一戳事件文本
-   ↓ 可选：写入官方 conversation（respond_poked_write_context）
+   ↓ 可选：写入官方 conversation（respond_poked_write_context；不受 respond_poked_cd 影响）
+   ↓ 检查 respond_poked_enabled
+   ↓ 检查 respond_poked_cd（仅控制是否主动调 LLM，防刷屏）
+   ↓ 检查 respond_poked_prob（概率）
    ↓ 获取当前 persona system_prompt
    ↓ 读取并清洗最近 user/assistant 文本上下文
-   ↓ event.request_llm(prompt, session_id, system_prompt, contexts) → yield
+   ↓ 获取全局 LLM 工具集（确保 poke_user 可用）
+   ↓ event.request_llm(prompt, session_id, system_prompt, contexts, func_tool_manager, tool_set) → yield
    ↓
 LLM 结合人格、最近上下文和 poke_event 文本决定回应
 ```

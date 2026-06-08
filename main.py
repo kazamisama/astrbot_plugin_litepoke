@@ -312,6 +312,40 @@ class LitePokePlugin(Star):
             logger.debug(f"[litepoke] 已构造安全最近上下文 messages={len(contexts)}")
         return contexts
 
+    def _get_llm_tooling(self) -> tuple[Any | None, Any | None]:
+        """获取当前 AstrBot LLM 工具管理器和 ToolSet。
+
+        主动 notice 事件触发的 request_llm 不一定自动携带插件工具；显式传入
+        func_tool_manager/tool_set，确保 poke_user 和其他全局工具在本次请求中可用。
+        """
+        try:
+            if not hasattr(self.context, "get_llm_tool_manager"):
+                return None, None
+            func_tools_mgr = self.context.get_llm_tool_manager()
+            if func_tools_mgr is None:
+                return None, None
+
+            if hasattr(func_tools_mgr, "get_full_tool_set"):
+                tool_set = func_tools_mgr.get_full_tool_set()
+            else:
+                tool_set = func_tools_mgr
+
+            tools = getattr(tool_set, "tools", None)
+            if tools is None:
+                tools = getattr(tool_set, "func_list", None)
+            if tools is not None:
+                for tool in list(tools):
+                    if hasattr(tool, "active") and not tool.active:
+                        if hasattr(tool_set, "remove_tool"):
+                            tool_set.remove_tool(tool.name)
+                        elif hasattr(tool_set, "remove_func"):
+                            tool_set.remove_func(tool.name)
+
+            return func_tools_mgr, tool_set
+        except Exception as e:
+            logger.warning(f"[litepoke] 获取 LLM 工具集失败: {e}")
+            return None, None
+
     async def _append_poke_event_to_conversation(
         self,
         event: AiocqhttpMessageEvent,
@@ -858,10 +892,27 @@ class LitePokePlugin(Star):
         if user_id == self_id:
             return
 
-        # bot 自己被戳 → 累积 PokeLog + 主动调 LLM 回应（接管 chat_plus 的 bot_only 行为）
+        # bot 自己被戳 → 累积 PokeLog + 写入上下文 + 可选主动调 LLM 回应
         if target_id == self_id:
             self._poke_log.record(str(user_id), time.time())
             self._maybe_periodic_save()
+
+            # 先构造并写入 poke 事件：respond_poked_cd 只控制是否主动调 LLM，
+            # 不应阻止事件进入 conversation，否则 CD 期间的戳会在上下文里丢失。
+            try:
+                sender_name = event.get_sender_name() or "未知用户"
+            except Exception:
+                sender_name = "未知用户"
+            poke_info = {
+                "sender_id": str(user_id),
+                "sender_name": sender_name,
+                "target_id": str(self_id),
+                "is_poke_bot": True,
+            }
+            poke_text = self._build_poke_event_text(poke_info)
+            if not poke_text:
+                return
+            await self._append_poke_event_to_conversation(event, poke_text)
 
             # 接管：主动触发 LLM 回应（v1.3.0+）
             if not self.cfg.get("respond_poked_enabled", True):
@@ -880,22 +931,6 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 构造伪消息文本
-            try:
-                sender_name = event.get_sender_name() or "未知用户"
-            except Exception:
-                sender_name = "未知用户"
-            poke_info = {
-                "sender_id": str(user_id),
-                "sender_name": sender_name,
-                "target_id": str(self_id),
-                "is_poke_bot": True,
-            }
-            poke_text = self._build_poke_event_text(poke_info)
-            if not poke_text:
-                return
-            await self._append_poke_event_to_conversation(event, poke_text)
-
             # 主动调 LLM：不要传 conversation 对象。
             # AstrBot conversation 里可能包含历史 tool 消息；在 notice 事件中原样复用时，
             # 兼容 OpenAI 的严格接口可能因 tool/tool_calls 配对上下文被裁剪或重组而报 400。
@@ -908,6 +943,7 @@ class LitePokePlugin(Star):
                 prompt = prompt_template.format(poke_event=poke_text)
                 system_prompt = await self._get_current_persona_prompt(event)
                 contexts = await self._build_recent_contexts(event)
+                func_tools_mgr, tool_set = self._get_llm_tooling()
 
                 self._last_any_poke = time.time()
                 logger.info(
@@ -918,6 +954,8 @@ class LitePokePlugin(Star):
                     session_id=event.session_id,
                     system_prompt=system_prompt,
                     contexts=contexts,
+                    func_tool_manager=func_tools_mgr,
+                    tool_set=tool_set,
                 )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")

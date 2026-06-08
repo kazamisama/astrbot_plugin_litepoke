@@ -2,6 +2,17 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.6] - 2026-06-08
+
+### Fixed
+- 主动戳一戳回应的 `event.request_llm()` 现在显式传入 `func_tool_manager` / `tool_set`，确保该 notice 触发链路也能看到 `poke_user` 等 LLM 工具，避免模型只能用 `send_message_to_user` 假装“反戳”。
+- `respond_poked_cd` 现在只控制是否主动调 LLM，不再阻止戳一戳事件写入 conversation。CD 内的戳一戳也会被记录为文本上下文。
+
+### Changed
+- `metadata.yaml` version：v1.3.5 → v1.3.6
+
+---
+
 ## [v1.3.5] - 2026-06-08
 
 ### Changed
