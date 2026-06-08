@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.2] - 2026-06-08
+
+### Fixed
+- 修复 v1.3.1 为避免 `conversation` 中历史 tool 消息导致 400 后，只传短 `prompt + session_id` 造成主动戳一戳回应丢失人格、表现像“换了一个人”的问题。
+- 主动戳一戳回应现在会通过 `persona_manager.get_default_persona_v3(event.unified_msg_origin)` 单独获取当前会话人格 prompt，并作为 `system_prompt` 传入 `event.request_llm()`。
+
+### Changed
+- `metadata.yaml` version：v1.3.1 → v1.3.2
+- 继续保持不传完整 `conversation`，避免重新引入 OpenAI 兼容接口的 tool/tool_calls 历史配对问题。
+
+---
+
 ## [v1.3.1] - 2026-06-08
 
 ### Fixed

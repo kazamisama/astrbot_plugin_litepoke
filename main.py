@@ -216,6 +216,30 @@ class LitePokePlugin(Star):
             logger.warning(f"[litepoke] 获取 conversation 失败: {e}")
             return None
 
+    async def _get_current_persona_prompt(self, event: AiocqhttpMessageEvent) -> str:
+        """获取当前会话的人格 system prompt。
+
+        主动戳一戳回应不能传完整 conversation（历史 tool 消息可能触发兼容接口 400），
+        但只传短 prompt 又会丢人格。这里单独取当前人格 prompt 作为 system_prompt。
+        """
+        try:
+            persona_mgr = getattr(self.context, "persona_manager", None)
+            if persona_mgr is None or not hasattr(persona_mgr, "get_default_persona_v3"):
+                return ""
+
+            persona = await persona_mgr.get_default_persona_v3(event.unified_msg_origin)
+            if not isinstance(persona, dict):
+                return ""
+
+            prompt = persona.get("prompt", "") or ""
+            if prompt:
+                name = persona.get("name", "default")
+                logger.debug(f"[litepoke] 已获取当前人格 prompt name={name} len={len(prompt)}")
+            return prompt
+        except Exception as e:
+            logger.warning(f"[litepoke] 获取当前人格 prompt 失败: {e}")
+            return ""
+
     # ===================== 内部：CD 管理 =====================
 
     def _cd_passed(self, scope: str, user_id: str) -> bool:
@@ -746,19 +770,24 @@ class LitePokePlugin(Star):
             # 主动调 LLM：不要传 conversation 对象。
             # AstrBot conversation 里可能包含历史 tool 消息；在 notice 事件中原样复用时，
             # 兼容 OpenAI 的严格接口可能因 tool/tool_calls 配对上下文被裁剪或重组而报 400。
-            # 这里采用 group_chat_plus 的兼容写法：只传当前短 prompt + session_id。
+            # 但仅传短 prompt 会丢失人格，因此单独传当前 persona 的 system_prompt。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
                 prompt = prompt_template.format(poke_event=poke_text)
+                system_prompt = await self._get_current_persona_prompt(event)
 
                 self._last_any_poke = time.time()
                 logger.info(
                     f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM"
                 )
-                yield event.request_llm(prompt=prompt, session_id=event.session_id)
+                yield event.request_llm(
+                    prompt=prompt,
+                    session_id=event.session_id,
+                    system_prompt=system_prompt,
+                )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
             return
