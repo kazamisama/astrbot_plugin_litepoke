@@ -136,12 +136,8 @@ class LitePokePlugin(Star):
         super().__init__(context)
         self.cfg = config
 
-        # 全局CD：任意两次戳人之间的最小间隔
+        # 最近一次主动动作时间：用于跟戳 / 被戳主动回应防刷屏
         self._last_any_poke: float = 0.0
-
-        # per-user CD：{ (scope, user_id): last_poke_time }
-        # scope 在群聊是 group_id，私聊是 "_private"
-        self._user_last_poke: dict[tuple[str, str], float] = {}
 
         # 引导CD：{ scope: last_guide_time }
         self._guide_last: dict[str, float] = defaultdict(float)
@@ -385,23 +381,10 @@ class LitePokePlugin(Star):
             logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
             return False
 
-    # ===================== 内部：CD 管理 =====================
-
-    def _cd_passed(self, scope: str, user_id: str) -> bool:
-        now = time.time()
-        global_cd = float(self.cfg.get("global_cd", 5))
-        if now - self._last_any_poke < global_cd:
-            return False
-        user_cd = float(self.cfg.get("user_cd", 60))
-        last = self._user_last_poke.get((scope, user_id), 0.0)
-        if now - last < user_cd:
-            return False
-        return True
+    # ===================== 内部：状态记录 =====================
 
     def _record_poke(self, scope: str, user_id: str) -> None:
-        now = time.time()
-        self._last_any_poke = now
-        self._user_last_poke[(scope, user_id)] = now
+        self._last_any_poke = time.time()
 
     # ===================== 内部：PokeLog 持久化 =====================
 
@@ -660,11 +643,8 @@ class LitePokePlugin(Star):
         if is_aiocqhttp and not user_id.isdigit():
             return "戳一戳失败：aiocqhttp 平台下 user_id 必须是纯数字 QQ 号"
 
-        # CD 检查：CD 期间不真正戳，但静默累积到 PokeLog
-        if not self._cd_passed(scope, user_id):
-            self._poke_log.record(user_id, time.time())
-            self._maybe_periodic_save()
-            return ""  # 空返回，不报错，让 LLM 自然处理
+        # 不再做工具级 CD：LLM 调用 poke_user 时应当要么真实执行，要么返回明确失败。
+        # 防刷屏交给 platform / 群被戳主动响应 / 跟戳分支各自的限制处理。
 
         # === 分支 A：aiocqhttp 真戳 ===
         if is_aiocqhttp and group_id:
@@ -714,10 +694,10 @@ class LitePokePlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event, request):
-        """在 LLM 请求前注入场景引导 + PokeLog 统计
+        """在 LLM 请求前注入场景引导 + 可选 PokeLog 统计
 
         两个独立通道：
-        1. PokeLog 统计：总是尝试（如果有累积）。让 LLM 感知"刚被戳"或"今天被戳 N 次"。
+        1. PokeLog 统计：默认关闭；开启 poke_log_inject_enabled 后才注入。
         2. 关键词引导：仅当用户消息命中 trigger_keywords 时执行。
         """
         msg = event.message_str or ""
@@ -727,13 +707,15 @@ class LitePokePlugin(Star):
         if not event.get_group_id() and self.cfg.get("only_group", True):
             return
 
-        # === 通道 1：PokeLog 统计（总是）===
-        poke_log_block = self._build_poke_log_block()
-        if poke_log_block:
-            if hasattr(request, "system_prompt") and request.system_prompt:
-                request.system_prompt = request.system_prompt.rstrip() + "\n\n" + poke_log_block
-            elif hasattr(request, "system_prompt"):
-                request.system_prompt = poke_log_block
+        # === 通道 1：PokeLog 统计（默认关闭）===
+        # v1.3.4 起戳一戳事件已写入 conversation；PokeLog 仅保留统计能力，默认不再注入 prompt。
+        if self.cfg.get("poke_log_inject_enabled", False):
+            poke_log_block = self._build_poke_log_block()
+            if poke_log_block:
+                if hasattr(request, "system_prompt") and request.system_prompt:
+                    request.system_prompt = request.system_prompt.rstrip() + "\n\n" + poke_log_block
+                elif hasattr(request, "system_prompt"):
+                    request.system_prompt = poke_log_block
 
         # === 通道 2：关键词引导 ===
         keywords = self.cfg.get("trigger_keywords", []) or []
@@ -870,6 +852,7 @@ class LitePokePlugin(Star):
         # 只处理群内
         if not group_id:
             return
+        gid = str(group_id)
 
         # 忽略机器人自己发的戳
         if user_id == self_id:
@@ -1030,8 +1013,7 @@ class LitePokePlugin(Star):
 
     async def terminate(self):
         self._save_poke_log()
-        self._user_last_poke.clear()
         self._guide_last.clear()
         self._meme_index.clear()
         self._vibe.clear()
-        logger.info("[litepoke] 插件已卸载，CD/meme/vibe/PokeLog 状态已清空")
+        logger.info("[litepoke] 插件已卸载，guide/meme/vibe/PokeLog 状态已清空")

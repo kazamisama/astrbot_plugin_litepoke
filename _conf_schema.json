@@ -1,16 +1,4 @@
 {
-    "global_cd": {
-        "description": "全局CD（秒）",
-        "hint": "任意两次戳一戳之间的最小间隔，用于防刷",
-        "type": "int",
-        "default": 5
-    },
-    "user_cd": {
-        "description": "同一用户被戳CD（秒）",
-        "hint": "同一个用户被戳之后，多久内不再戳他",
-        "type": "int",
-        "default": 60
-    },
     "poke_max_times": {
         "description": "aiocqhttp 单次最大戳次数",
         "hint": "LLM 传入的 times 上限（仅对 aiocqhttp 平台生效）",
@@ -45,7 +33,7 @@
         "description": "引导提示词",
         "hint": "命中关键词时附加到 system_prompt 的引导文本",
         "type": "text",
-        "default": "[轻量戳一戳提示] 用户语气可能带有调侃/挑衅，你**可以**考虑调用 poke_user 工具戳回去，但请仅在符合人设的语境下使用，不要滥用，也注意遵守 CD 限制。"
+        "default": "[轻量戳一戳提示] 用户语气可能带有调侃/挑衅，你**可以**考虑调用 poke_user 工具戳回去，但请仅在符合人设的语境下使用，不要滥用。"
     },
     "only_group": {
         "description": "仅群聊生效",
@@ -154,6 +142,12 @@
         "hint": "每隔多少秒把内存里的 PokeLog 写一次盘",
         "type": "int",
         "default": 60
+    },
+    "poke_log_inject_enabled": {
+        "description": "注入 PokeLog 统计到提示词",
+        "hint": "开启后会把近期/当天戳一戳统计追加到 system_prompt。默认关闭；v1.3.4+ 已将 bot 被戳事件写入 conversation，通常不需要再注入统计块",
+        "type": "bool",
+        "default": false
     },
     "respond_poked_enabled": {
         "description": "接管戳一戳响应（v1.3+）",

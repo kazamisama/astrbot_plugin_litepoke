@@ -2,6 +2,16 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.5] - 2026-06-08
+
+### Changed
+- PokeLog 统计默认不再注入 `system_prompt`。新增 `poke_log_inject_enabled`（默认 false），需要旧版统计提示时可手动开启。
+- 删除 `poke_user` 工具级全局/单用户 CD 静默分支；LLM 调用工具时不再出现“工具看似调用成功但实际没有反馈”的空返回。
+- 移除 `global_cd` / `user_cd` 配置项；防刷屏保留在跟戳 `follow_cd`、被戳主动响应 `respond_poked_cd` 和平台侧限制中。
+- `metadata.yaml` version：v1.3.4 → v1.3.5
+
+---
+
 ## [v1.3.4] - 2026-06-08
 
 ### Added

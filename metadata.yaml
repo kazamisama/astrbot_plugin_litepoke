@@ -2,7 +2,7 @@ name: astrbot_plugin_litepoke
 display_name: 轻量智能戳一戳
 desc: 轻量化戳一戳插件。注册 poke_user 工具给 LLM 自主调用，配合场景引导提示，由模型判断何时戳人。
 help: 提供 poke_user 工具，LLM 可自主决定是否戳指定用户。aiocqhttp 平台发送真实戳一戳，其他平台（webchat/telegram/飞书等）用表情包回退。
-version: v1.3.4
+version: v1.3.5
 author: chiriu & 橘雪莉
 repo: https://github.com/kazamisama/astrbot_plugin_litepoke
 support_platforms:

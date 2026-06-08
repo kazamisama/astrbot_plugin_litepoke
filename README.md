@@ -19,7 +19,7 @@
 | 平台 | aiocqhttp（真戳）+ 其他平台（表情回退） |
 | 调用方式 | LLM tool 自主调用 + 关键词场景引导 + **群内概率跟戳** |
 | 表情来源 | 插件自带数据目录，**不依赖** meme_manager |
-| 限频 | 全局CD + per-user CD + 引导CD + 跟戳CD |
+| 限频 | 引导CD + 跟戳CD + 被戳主动响应CD；`poke_user` 工具本身不再做静默CD |
 | 失败回退 | meme → QQ face → 文字，三级降级 |
 | 群氛围决策 | 60s 滑动窗口，O(1) 规则调概率，**不调 LLM** |
 | 代码量 | 单文件约 540 行 |
@@ -74,8 +74,6 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
-| `global_cd` | 5 | 任意两次戳一戳之间的最小间隔（秒） |
-| `user_cd` | 60 | 同一用户被戳后冷却（秒） |
 | `poke_max_times` | 3 | aiocqhttp 下 LLM 传入的 times 上限 |
 | `poke_interval` | 0.5 | 多次戳时每次间隔（秒） |
 | `trigger_keywords` | `["笨蛋","人机","机器人","bot","傻"]` | 命中即注入引导提示的关键词 |
@@ -99,6 +97,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `poke_log_window` | 60 | 短期窗口秒数（recent 队列） |
 | `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
 | `poke_log_save_interval` | 60 | 写盘间隔秒数 |
+| `poke_log_inject_enabled` | false | 是否把 PokeLog 统计注入 system_prompt，默认关闭 |
 | `respond_poked_enabled` | true | 接管戳一戳响应开关 |
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
@@ -169,14 +168,14 @@ poke_user(user_id, times=1, emotion=None)
 
 ### 5. PokeLog 累积日志（v1.2+）
 
-戳一戳是 `notice` 事件，**默认不进** LLM 对话上下文。litepoke 用 PokeLog 把戳一戳事件**累积**起来，等用户发消息时再通过 `on_llm_request` 注入统计。
+PokeLog 现在主要作为**统计缓存**保留，不再默认注入 LLM 提示词。v1.3.4+ 已经会把 bot 被戳的 notice 事件写入官方 conversation，通常不需要再用 PokeLog 做延迟感知。
 
 **两个维度**：
 
 | 字段 | 窗口 | 用途 |
 |---|---|---|
-| `recent` | 60s 短期 | "刚被戳了 N 次" |
-| `daily` | 24h 长期按 sender 分人 | "今天 A 戳了你 M 次" |
+| `recent` | 60s 短期 | 统计近期被戳次数 |
+| `daily` | 24h 长期按 sender 分人 | 统计今天谁戳了多少次 |
 
 **PokeLog 文件位置**：
 
@@ -184,9 +183,13 @@ poke_user(user_id, times=1, emotion=None)
 data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 ```
 
-**CD 期间被戳**：静默累积到 PokeLog，**不发任何消息**。等用户说话时 LLM 一次性看到。
+**默认行为**：
 
-**示例 LLM 引导注入**：
+- `poke_log_persist=true`：继续写盘保留统计
+- `poke_log_inject_enabled=false`：默认不把统计块注入 `system_prompt`
+- 如确实想恢复旧版“刚被戳 N 次 / 今天总共 M 次”的提示词注入，可手动开启 `poke_log_inject_enabled`
+
+**可选注入示例**：
 
 ```text
 [戳一戳统计] 刚被戳了 3 次（60秒内），其中 alice 戳了 2 次；
@@ -194,7 +197,7 @@ data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 如果觉得对方过界了，可以考虑用 poke_user 工具戳回去或发个文字吐槽。
 ```
 
-**消费机制**：LLM 看到 PokeLog 统计后，**recent 被清空**（防止下次重复注入）。`daily` 不清空，跨重启保留 7 天。
+**消费机制**：只有开启 `poke_log_inject_enabled` 并实际注入时，`recent` 才会被消费清空；`daily` 不清空，跨重启保留 7 天。
 
 ### 6. 接管 chat_plus 的戳一戳响应（v1.3+）
 
@@ -268,8 +271,8 @@ LLM 结合人格、最近上下文和 poke_event 文本决定回应
 - `/tool ls` 看插件是否在 tool 列表里
 
 **每次都戳同一个人**
-- `user_cd` 默认 60 秒，会拦住重复戳同一人
-- 但不同用户之间不受这个限制
+- `poke_user` 工具本身不再做静默 CD；如果需要减少重复动作，应通过人设约束、`poke_max_times`、平台限频或群内跟戳/被戳响应 CD 控制
+- 跟戳分支仍受 `follow_cd` / `vibe_max_in_window` 约束；bot 被戳主动回应仍受 `respond_poked_cd` 约束
 
 ---
 
