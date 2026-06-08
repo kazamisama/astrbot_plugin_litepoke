@@ -2,6 +2,15 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.9] - 2026-06-08
+
+### Fixed
+- 主动回应 bot 被戳时，当前戳一戳事件仍会写入 conversation，但即时 `request_llm` 构造 recent contexts 时会跳过同一条 `poke_text`，避免该事件同时出现在 prompt 和 contexts 中导致模型误判被戳了两次。
+
+### Changed
+- `metadata.yaml` version：v1.3.8 → v1.3.9
+
+---
 ## [v1.3.8] - 2026-06-08
 
 ### Fixed
