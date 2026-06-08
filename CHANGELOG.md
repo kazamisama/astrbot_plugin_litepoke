@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.1] - 2026-06-08
+
+### Fixed
+- 修复 bot 被戳后主动调用 LLM 时携带完整 `conversation`，在部分 OpenAI 兼容接口上可能因历史 `tool` 消息与 `tool_calls` 被裁剪/重组而触发 400：`Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`。
+- 被戳主动回应改为只传当前短 `prompt` 与 `session_id`，避免把历史工具调用消息原样带入 notice 事件触发的主动请求。
+
+### Changed
+- `metadata.yaml` version：v1.3.0 → v1.3.1
+- 部署约定更新：本地仓库作为唯一开发仓库；服务器仅同步已发布代码，不再作为开发仓库使用。
+
+---
+
 ## [v1.3.0] - 2026-06-07
 
 ### Added
