@@ -7,6 +7,7 @@
 - **LLM 自主判断**：注册 `poke_user` 工具，模型自行决定何时戳
 - **场景引导钩子**：检测关键词 → 往 system_prompt 注入提示 → 让 LLM 考虑调用
 - **群内跟戳**（v1.1+）：监听群内戳一戳事件，按概率跟戳"别人戳别人"，基于滑动窗口的轻量群氛围决策
+- **被戳回应**（v1.4+）：bot 被戳时把 poke notice 伪造成普通文字消息重投递，群聊/私聊统一走 AstrBot 标准消息链路
 
 代码刻意保持单文件、零依赖、易读易改。
 
@@ -17,7 +18,7 @@
 | 项 | 说明 |
 |---|---|
 | 平台 | aiocqhttp（真戳）+ 其他平台（表情回退） |
-| 调用方式 | LLM tool 自主调用 + 关键词场景引导 + **群内概率跟戳** |
+| 调用方式 | LLM tool 自主调用 + 关键词场景引导 + **群内概率跟戳** + **被戳伪消息重投递** |
 | 表情来源 | 插件自带数据目录，**不依赖** meme_manager |
 | 限频 | 引导CD + 跟戳CD + 被戳主动响应CD；`poke_user` 工具本身不再做静默CD |
 | 失败回退 | meme → QQ face → 文字，三级降级 |
@@ -101,8 +102,8 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `respond_poked_enabled` | true | 接管戳一戳响应开关 |
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
-| `respond_poked_prompt` | 见配置 | 被戳响应 prompt 模板 |
-| `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation |
+| `respond_poked_prompt` | 见配置 | 被戳伪消息模板；非 CD 时会作为普通文字消息重投递到 AstrBot 事件队列 |
+| `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation；CD 内只写入不即时回应 |
 
 ---
 

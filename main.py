@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import random
 import time
@@ -380,6 +381,45 @@ class LitePokePlugin(Star):
         suffix = f" reason={reason}" if reason else ""
         logger.warning(f"[litepoke] 已清理非法 LLM history {removed} 条 id={cid}{suffix}")
         return True
+
+    async def _replay_poke_as_message(
+        self,
+        event: AiocqhttpMessageEvent,
+        poke_text: str,
+    ) -> bool:
+        """把 poke notice 伪造成一条普通文字消息，重新投递到 AstrBot 事件队列。
+
+        借鉴 pokepro 的 COMMAND 模块：copy event → 改 message/message_str
+        → should_call_llm(True) → set_extra 防递归 → put_nowait。
+        不插入真实 At 组件，只强制唤醒，让它像“被戳了一下”这类普通文字输入。
+        """
+        if not poke_text:
+            return False
+
+        try:
+            evt = copy.copy(event)
+            evt.message_obj = copy.copy(event.message_obj)
+            try:
+                evt._extras = dict(event.get_extra())
+            except Exception:
+                pass
+
+            evt.clear_result()
+            event.stop_event()
+
+            chain = [Plain(poke_text)]
+            evt.message_obj.message = chain
+            evt.message_obj.message_str = poke_text
+            evt.message_str = poke_text
+            evt.is_at_or_wake_command = True
+            evt.should_call_llm(True)
+            evt.set_extra("litepoke_replayed_poke", True)
+
+            self.context.get_event_queue().put_nowait(evt)
+            return True
+        except Exception as e:
+            logger.warning(f"[litepoke] poke 伪消息重投递失败: {e}")
+            return False
 
     async def _append_poke_event_to_conversation(
         self,
@@ -1088,6 +1128,8 @@ class LitePokePlugin(Star):
         """
         if not isinstance(event, AiocqhttpMessageEvent):
             return
+        if event.get_extra("litepoke_replayed_poke"):
+            return
 
         # 解析戳一戳事件
         raw = getattr(event.message_obj, "raw_message", None)
@@ -1170,23 +1212,20 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 非 CD：把 poke 伪造成一条可读文字输入，交给 AstrBot 的 LLM 请求默认链路。
-            # CD 内已在上方写入 conversation 后 return；这里不再手动拼 persona/tool_set/conversation，
-            # 避免 notice 事件主动请求链路越来越重。
+            # 非 CD：把 poke 伪造成普通文字消息，重新投递到 AstrBot 事件队列。
+            # 这样群聊/私聊都走标准消息 pipeline，而不是在 notice 事件里手动 request_llm。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
-                prompt = prompt_template.format(poke_event=poke_text)
+                replay_text = prompt_template.format(poke_event=poke_text)
 
                 self._last_respond_poked = time.time()
+                replayed = await self._replay_poke_as_message(event, replay_text)
                 logger.info(
-                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} -> 伪消息触发 LLM"
-                )
-                yield event.request_llm(
-                    prompt=prompt,
-                    session_id=event.session_id,
+                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
+                    f"-> 伪消息重投递 {'ok' if replayed else 'failed'}"
                 )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")

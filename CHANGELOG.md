@@ -2,6 +2,19 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.0] - 2026-06-09
+
+### Changed
+- bot 被戳后的非 CD 即时回应改为借鉴 pokepro 的“复制事件并重投递”方案：copy event → 替换为 `Plain(poke_text)` 伪文字消息 → `should_call_llm(True)` → `context.get_event_queue().put_nowait(evt)`。
+- 群聊和私聊被戳统一走伪消息重投递链路，减少 notice 事件里手动 `request_llm` 的耦合。
+- 重投递事件会设置 `litepoke_replayed_poke` 标记，监听器收到该标记后直接跳过，避免递归处理。
+- CD 内行为保持不变：只写入 conversation，不触发即时回应。
+- `metadata.yaml` version：v1.3.16 → v1.4.0
+
+### Removed
+- 移除 bot 被戳即时回应中的直接 `event.request_llm(...)` 调用。
+
+---
 ## [v1.3.16] - 2026-06-09
 
 ### Fixed
