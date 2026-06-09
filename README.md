@@ -79,7 +79,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `trigger_keywords` | `["笨蛋","人机","机器人","bot","傻"]` | 命中即注入引导提示的关键词 |
 | `guide_cd` | 30 | 同一会话内引导提示最小间隔（秒） |
 | `guide_prompt` | 见配置 | 普通消息命中关键词时注入到 system_prompt 的轻量引导；不处理 bot 被戳事件 |
-| `only_group` | true | 是否仅在群聊生效 |
+| `only_group` | true | 是否仅在群聊生效；为 true 时私聊 `poke_user` 和私聊被戳主动回应都会关闭 |
 | `enable_meme_fallback` | true | 非 aiocqhttp 平台是否启用表情回退 |
 | `meme_dir` | 空 | 自定义表情根目录；留空 = 插件自带目录 |
 | `default_emotion` | `baka` | 默认 emotion 标签 |

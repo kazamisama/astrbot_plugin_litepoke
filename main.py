@@ -1031,20 +1031,16 @@ class LitePokePlugin(Star):
         vibe.last_msg_sender = str(event.get_sender_id())
         vibe.prune(now, window)
 
-    # ===================== 辅助：群内戳一戳监听 + 概率跟戳 =====================
+    # ===================== 辅助：戳一戳监听 + 概率跟戳 =====================
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_poke(self, event):
-        """监听群内戳一戳事件，按概率跟着戳被戳的人
+        """监听 aiocqhttp 戳一戳事件。
 
-        仅触发条件：
-        - aiocqhttp 平台
-        - 戳一戳事件（post_type=notice, notice_type=notify, sub_type=poke）
-        - 群内（group_id 非空）
-        - 是别人戳别人（不是自己发的，也不是戳 bot 自己）
-        - 按 follow_prob 概率触发
-        - 走 follow_cd 兜底，避免连续事件刷屏
+        支持两类场景：
+        - bot 被戳：群聊/私聊都可写入上下文并主动调 LLM 回应（私聊受 only_group 配置限制）。
+        - 概率跟戳：仅群聊中别人戳别人时生效。
         """
         if not isinstance(event, AiocqhttpMessageEvent):
             return
@@ -1064,11 +1060,12 @@ class LitePokePlugin(Star):
         user_id = str(raw.get("user_id", "") or "")        # 戳人的
         target_id = str(raw.get("target_id", "") or "")    # 被戳的
         group_id = str(raw.get("group_id", "") or "")
-
-        # 只处理群内
-        if not group_id:
-            return
+        is_private = not group_id
         gid = group_id
+
+        # 私聊开关：与 poke_user 工具保持一致。
+        if is_private and self.cfg.get("only_group", True):
+            return
 
         # bot 自己发出的戳一戳是 outgoing 动作，不应作为新的 user 输入进入上下文。
         # 注意：这里必须早于 follow_enabled；follow_enabled 只控制概率跟戳，不控制清理 outgoing notice。
@@ -1129,43 +1126,37 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 主动调 LLM：优先传入当前 conversation。
-            # bot 被戳事件已先写入 conversation；conversation 路线下 prompt 只给回应指令，
-            # 不再重复塞完整 poke_text，避免模型把一次戳一戳误判成两次。
-            # 若 conversation 获取失败，则降级为 persona system_prompt + 完整 poke_event prompt。
+            # 主动调 LLM：不要把完整 conversation 传给 notice 事件触发的主动请求。
+            # 戳一戳事件仍会先写入官方 conversation，供后续普通聊天读取；
+            # 但当场回应只传当前 poke_event prompt + persona，避免历史里残留的空 assistant/tool
+            # 消息重新触发 OpenAI 兼容接口 400（content or tool_calls must be set）。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
                 prompt = prompt_template.format(poke_event=poke_text)
-                conversation_prompt = prompt_template.format(poke_event="上文最新的戳一戳事件")
-                conversation = await self._get_conversation(event)
-                system_prompt = "" if conversation is not None else await self._get_current_persona_prompt(event)
+                system_prompt = await self._get_current_persona_prompt(event)
                 func_tools_mgr, tool_set = self._get_llm_tooling()
 
                 self._last_respond_poked = time.time()
                 logger.info(
-                    f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM "
-                    f"conversation={'yes' if conversation is not None else 'no'}"
+                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} -> 主动调 LLM "
+                    "conversation=no"
                 )
-                if conversation is not None:
-                    yield event.request_llm(
-                        prompt=conversation_prompt,
-                        conversation=conversation,
-                        func_tool_manager=func_tools_mgr,
-                        tool_set=tool_set,
-                    )
-                else:
-                    yield event.request_llm(
-                        prompt=prompt,
-                        session_id=event.session_id,
-                        system_prompt=system_prompt,
-                        func_tool_manager=func_tools_mgr,
-                        tool_set=tool_set,
-                    )
+                yield event.request_llm(
+                    prompt=prompt,
+                    session_id=event.session_id,
+                    system_prompt=system_prompt,
+                    func_tool_manager=func_tools_mgr,
+                    tool_set=tool_set,
+                )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
+            return
+
+        # 概率跟戳只支持群聊；私聊中不是 bot 被戳/不是 bot 发出的 poke，到这里直接结束。
+        if is_private:
             return
 
         if not self.cfg.get("follow_enabled", True):

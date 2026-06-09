@@ -2,6 +2,17 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.15] - 2026-06-09
+
+### Fixed
+- aiocqhttp 私聊收到别人戳 bot 的 notice 时不再因 `group_id` 为空被提前忽略；在 `only_group=false` 时会写入戳一戳上下文并主动触发 LLM 回应。
+- bot 私聊主动戳别人产生的 outgoing poke notice 也会进入清理分支，避免原始空 Poke 消息残留到 conversation。
+
+### Changed
+- 戳一戳接管日志从 `group=` 改为 `scope=`，私聊场景会显示 `_private`，方便排查。
+- `metadata.yaml` version：v1.3.14 → v1.3.15
+
+---
 ## [v1.3.14] - 2026-06-09
 
 ### Fixed
