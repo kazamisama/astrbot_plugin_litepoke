@@ -2,6 +2,15 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.12] - 2026-06-09
+
+### Changed
+- 整合服务器 patch：bot 被戳后的主动 `request_llm` 现在优先传入当前 conversation，使即时回复也能读取官方 conversation 中刚写入的戳一戳事件和最近上下文。
+- conversation 路线下 `respond_poked_prompt` 不再重复塞入完整 `poke_text`，而是引用“上文最新的戳一戳事件”，避免一次戳一戳同时出现在 prompt 和 conversation 中导致模型误判被戳两次。
+- 获取 conversation 失败时仍降级为 `poke_event` prompt + 当前 persona `system_prompt`。
+- `metadata.yaml` version：v1.3.11 → v1.3.12
+
+---
 ## [v1.3.11] - 2026-06-09
 
 ### Changed

@@ -958,31 +958,41 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 主动调 LLM：不要传 conversation/contexts。
-            # AstrBot conversation 里可能包含历史 tool 消息；在 notice 事件中原样复用时，
-            # 兼容 OpenAI 的严格接口可能因 tool/tool_calls 配对上下文被裁剪或重组而报 400。
-            # 当前 poke_event 只通过 prompt 传入一次；写入 conversation 的事件留给后续普通对话使用。
-            # 但仅传短 prompt 会丢失人格，因此单独传当前 persona 的 system_prompt。
+            # 主动调 LLM：优先传入当前 conversation。
+            # bot 被戳事件已先写入 conversation；conversation 路线下 prompt 只给回应指令，
+            # 不再重复塞完整 poke_text，避免模型把一次戳一戳误判成两次。
+            # 若 conversation 获取失败，则降级为 persona system_prompt + 完整 poke_event prompt。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
                 prompt = prompt_template.format(poke_event=poke_text)
-                system_prompt = await self._get_current_persona_prompt(event)
+                conversation_prompt = prompt_template.format(poke_event="上文最新的戳一戳事件")
+                conversation = await self._get_conversation(event)
+                system_prompt = "" if conversation is not None else await self._get_current_persona_prompt(event)
                 func_tools_mgr, tool_set = self._get_llm_tooling()
 
                 self._last_any_poke = time.time()
                 logger.info(
-                    f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM"
+                    f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM "
+                    f"conversation={'yes' if conversation is not None else 'no'}"
                 )
-                yield event.request_llm(
-                    prompt=prompt,
-                    session_id=event.session_id,
-                    system_prompt=system_prompt,
-                    func_tool_manager=func_tools_mgr,
-                    tool_set=tool_set,
-                )
+                if conversation is not None:
+                    yield event.request_llm(
+                        prompt=conversation_prompt,
+                        conversation=conversation,
+                        func_tool_manager=func_tools_mgr,
+                        tool_set=tool_set,
+                    )
+                else:
+                    yield event.request_llm(
+                        prompt=prompt,
+                        session_id=event.session_id,
+                        system_prompt=system_prompt,
+                        func_tool_manager=func_tools_mgr,
+                        tool_set=tool_set,
+                    )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
             return

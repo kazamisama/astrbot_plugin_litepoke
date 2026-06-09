@@ -219,11 +219,12 @@ on_group_poke 触发
    ↓ 检查 respond_poked_enabled
    ↓ 检查 respond_poked_cd（仅控制是否主动调 LLM，防刷屏）
    ↓ 检查 respond_poked_prob（概率）
-   ↓ 获取当前 persona system_prompt
+   ↓ 优先获取当前 conversation
    ↓ 获取全局 LLM 工具集（确保 poke_user 可用）
-   ↓ event.request_llm(prompt, session_id, system_prompt, func_tool_manager, tool_set) → yield
+   ↓ conversation 可用：event.request_llm(prompt, conversation, func_tool_manager, tool_set) → yield
+   ↓ conversation 不可用：获取当前 persona system_prompt 后降级 request_llm(prompt, session_id, system_prompt, func_tool_manager, tool_set) → yield
    ↓
-LLM 结合人格和 poke_event 文本决定回应
+LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应；降级路线只结合人格和 poke_event 文本
 ```
 
 这里不使用 `guide_prompt`；`guide_prompt` 只用于普通消息命中关键词时的轻量工具提醒，被戳事件由 `respond_poked_prompt` 独立控制。
@@ -250,7 +251,7 @@ LLM 结合人格和 poke_event 文本决定回应
 - PokeLog（v1.2+）通过 `on_llm_request` 钩子**延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
 - **接管响应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
 - **写入上下文**（v1.3.4+）：开启 `respond_poked_write_context` 后，bot 被戳的 notice 会作为一条纯文本 `user` 消息写入官方 conversation，后续普通对话也能自然感知这次戳一戳事件
-- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`，主动回应时也不会把原始 conversation 或额外拼接的历史消息传给 LLM；当前戳一戳事件只通过 prompt 传入一次，写入 conversation 的记录留给后续普通对话使用
+- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。主动回应时会优先传入官方 conversation；由于当前戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则降级为只传 `poke_event` prompt + 当前 persona `system_prompt`
 
 ---
 
