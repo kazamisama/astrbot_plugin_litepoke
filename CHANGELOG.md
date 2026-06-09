@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.1] - 2026-06-09
+
+### Fixed
+- 修复 bot 被戳后日志显示“伪消息重投递 ok”，但实际没有进入 LLM 回复阶段、最终群里无响应的问题。
+- 新增 `respond_poked_mode` 配置：`direct` 默认直接发送表情/文字回退，保证被戳一定有可见响应；`llm`/`replay` 直接走 AstrBot 原生 `event.request_llm(...)` 请求链，让模型按人设回应。
+- `llm`/`replay` 模式不再依赖 `context.get_event_queue().put_nowait(evt)` 伪消息重投递，避免只触发插件监听、不触发核心 LLM 的 pipeline 空转。
+- LLM 请求失败时会自动降级为直发回退响应，避免再次沉默。
+
+### Changed
+- `metadata.yaml` version：v1.4.0 → v1.4.1
+
+---
 ## [v1.4.0] - 2026-06-09
 
 ### Changed
