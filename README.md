@@ -78,7 +78,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `poke_interval` | 0.5 | 多次戳时每次间隔（秒） |
 | `trigger_keywords` | `["笨蛋","人机","机器人","bot","傻"]` | 命中即注入引导提示的关键词 |
 | `guide_cd` | 30 | 同一会话内引导提示最小间隔（秒） |
-| `guide_prompt` | 见配置 | 注入到 system_prompt 的引导文本 |
+| `guide_prompt` | 见配置 | 普通消息命中关键词时注入到 system_prompt 的轻量引导；不处理 bot 被戳事件 |
 | `only_group` | true | 是否仅在群聊生效 |
 | `enable_meme_fallback` | true | 非 aiocqhttp 平台是否启用表情回退 |
 | `meme_dir` | 空 | 自定义表情根目录；留空 = 插件自带目录 |
@@ -130,7 +130,7 @@ poke_user(user_id, times=1, emotion=None)
 
 > 你可以使用 `poke_user` 工具主动戳用户，但仅在符合当前语境的场景下使用，不要滥用。
 
-`trigger_keywords` 命中时也会自动注入引导提示（`guide_prompt`）。
+`trigger_keywords` 命中普通消息时也会自动注入轻量引导提示（`guide_prompt`）。它只负责提醒 LLM 有 `poke_user` 这个互动工具；bot 被戳后的即时回应由 `respond_poked_prompt` 单独控制。
 
 ### 2. 表情选择策略
 
@@ -225,6 +225,8 @@ on_group_poke 触发
    ↓
 LLM 结合人格和 poke_event 文本决定回应
 ```
+
+这里不使用 `guide_prompt`；`guide_prompt` 只用于普通消息命中关键词时的轻量工具提醒，被戳事件由 `respond_poked_prompt` 独立控制。
 
 **默认 prompt**：
 

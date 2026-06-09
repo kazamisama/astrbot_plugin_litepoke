@@ -795,7 +795,7 @@ class LitePokePlugin(Star):
 
         guide_prompt = self.cfg.get(
             "guide_prompt",
-            "[轻量戳一戳提示] 用户语气可能带有调侃/挑衅，你可以考虑调用 poke_user 工具戳回去。",
+            "[轻量戳一戳提示] 如果当前对话氛围适合轻微互动，可以考虑调用 poke_user 工具；不要因为看到提示就强行调用。",
         )
 
         if hasattr(request, "system_prompt") and request.system_prompt:

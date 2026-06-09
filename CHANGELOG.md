@@ -2,6 +2,14 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.11] - 2026-06-09
+
+### Changed
+- 调整默认 `guide_prompt`：从“戳回去”改为普通消息场景下的轻量工具提醒，避免和 `respond_poked_prompt` 的被戳事件回应职责重叠。
+- `_conf_schema.json` 和 README 明确 `guide_prompt` 只用于普通消息命中关键词时的引导；bot 被戳后的即时回应由 `respond_poked_prompt` 独立控制。
+- `metadata.yaml` version：v1.3.10 → v1.3.11
+
+---
 ## [v1.3.10] - 2026-06-08
 
 ### Removed
