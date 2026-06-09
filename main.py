@@ -889,11 +889,21 @@ class LitePokePlugin(Star):
         # === 分支 A2：aiocqhttp 私聊（好友戳） ===
         if is_aiocqhttp:
             try:
-                await event.bot.friend_poke(user_id=int(user_id))
+                # NapCat / OneBot 新实现更稳定支持 send_poke；
+                # 旧 friend_poke 封装在部分适配组合里可能存在但无实际效果。
+                await event.bot.api.call_action("send_poke", user_id=int(user_id))
                 self._record_poke(scope, user_id)
                 return f"已戳好友 {user_id} 1 次"
-            except Exception as e:
-                return f"戳好友失败：{e}"
+            except Exception as send_poke_err:
+                logger.warning(
+                    f"[litepoke] 私聊 send_poke 失败，尝试 friend_poke 兜底 user_id={user_id}: {send_poke_err}"
+                )
+                try:
+                    await event.bot.friend_poke(user_id=int(user_id))
+                    self._record_poke(scope, user_id)
+                    return f"已戳好友 {user_id} 1 次"
+                except Exception as friend_poke_err:
+                    return f"戳好友失败：send_poke={send_poke_err}; friend_poke={friend_poke_err}"
 
         # === 分支 B：非 aiocqhttp 平台用表情包回退 ===
         self._record_poke(scope, user_id)

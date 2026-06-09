@@ -113,7 +113,7 @@ poke_user(user_id, times=1, emotion=None)
 ```
 
 - `user_id`（必填）：目标用户ID
-  - aiocqhttp：必须是纯数字 QQ 号
+  - aiocqhttp：必须是纯数字 QQ 号；群聊会带 `group_id` 调用，私聊会优先使用 OneBot `send_poke`，失败时再尝试 `friend_poke` 兜底
   - 其他平台：任意字符串（webchat 用 sender_id 即可）
 - `times`（可选）：aiocqhttp 下戳的次数，1-3
 - `emotion`（可选）：表情标签名，如 `baka` / `angry` / `sad`。仅非 aiocqhttp 生效

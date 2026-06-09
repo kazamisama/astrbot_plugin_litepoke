@@ -2,6 +2,16 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.14] - 2026-06-09
+
+### Fixed
+- aiocqhttp 私聊 `poke_user` 优先改用 OneBot `send_poke` 原始 API，兼容 NapCat/新版实现中 `friend_poke` 封装存在但无实际效果的情况。
+- 私聊 `send_poke` 失败时保留 `friend_poke` 兜底，并在返回值中带出两条调用链的错误，方便排查平台兼容性。
+
+### Changed
+- `metadata.yaml` version：v1.3.13 → v1.3.14
+
+---
 ## [v1.3.13] - 2026-06-09
 
 ### Fixed
