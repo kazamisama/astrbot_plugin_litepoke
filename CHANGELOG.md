@@ -2,6 +2,17 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.16] - 2026-06-09
+
+### Fixed
+- 新增 conversation history 自修复：清理已残留的空 `assistant` 消息，以及没有匹配 `assistant.tool_calls` 的孤立 `tool` 消息，避免 OpenAI 兼容接口持续报 `Invalid assistant message: content or tool_calls must be set`。
+- bot 被戳写入戳一戳事件时会顺手清理当前 conversation 中的非法 LLM history，避免旧污染继续影响后续请求。
+- 普通 `on_llm_request` 前也会尝试清理当前 conversation，修复已经写进数据库的历史脏记录导致的持续复发。
+
+### Changed
+- `metadata.yaml` version：v1.3.15 → v1.3.16
+
+---
 ## [v1.3.15] - 2026-06-09
 
 ### Fixed

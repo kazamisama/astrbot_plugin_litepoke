@@ -321,6 +321,90 @@ class LitePokePlugin(Star):
         normalized = text.replace(" ", "").lower()
         return not text or normalized in {"[poke:poke]", "[componenttype.poke]"}
 
+    def _sanitize_llm_history(self, history: list[Any]) -> tuple[list[Any], int]:
+        """清理会导致 OpenAI 兼容接口 400 的明显非法 history 消息。
+
+        只移除两类确定不合法/不完整的记录：
+        1. role=assistant 且 content 为空、tool_calls 也为空。
+        2. 没有匹配上一个 assistant.tool_calls 的孤立 role=tool。
+        """
+        sanitized: list[Any] = []
+        removed = 0
+        pending_tool_call_ids: set[str] = set()
+
+        for msg in history:
+            if not isinstance(msg, dict):
+                sanitized.append(msg)
+                continue
+
+            role = msg.get("role")
+            if role == "assistant":
+                content = msg.get("content")
+                tool_calls = msg.get("tool_calls")
+                has_text = bool(self._extract_text_from_content(content))
+                has_tool_calls = isinstance(tool_calls, list) and bool(tool_calls)
+                if not has_text and not has_tool_calls:
+                    removed += 1
+                    pending_tool_call_ids.clear()
+                    continue
+
+                pending_tool_call_ids.clear()
+                if has_tool_calls:
+                    for call in tool_calls:
+                        if not isinstance(call, dict):
+                            continue
+                        call_id = str(call.get("id", "") or "")
+                        if call_id:
+                            pending_tool_call_ids.add(call_id)
+                sanitized.append(msg)
+                continue
+
+            if role == "tool":
+                tool_call_id = str(msg.get("tool_call_id", "") or "")
+                if not tool_call_id or tool_call_id not in pending_tool_call_ids:
+                    removed += 1
+                    continue
+                pending_tool_call_ids.discard(tool_call_id)
+                sanitized.append(msg)
+                continue
+
+            if role in {"user", "system"}:
+                pending_tool_call_ids.clear()
+            sanitized.append(msg)
+
+        return sanitized, removed
+
+    async def _sanitize_current_conversation(self, event: Any, *, reason: str = "") -> bool:
+        """把当前 conversation 中已残留的非法 LLM 消息清掉。"""
+        cid, conv = await self._get_conversation_with_id(event)
+        if not cid or conv is None:
+            return False
+
+        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if isinstance(raw_history, str):
+            try:
+                history = json.loads(raw_history)
+            except Exception:
+                return False
+        elif isinstance(raw_history, list):
+            history = list(raw_history)
+        else:
+            return False
+
+        sanitized, removed = self._sanitize_llm_history(history)
+        if not removed:
+            return False
+
+        conv_mgr = self.context.conversation_manager
+        try:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=sanitized)
+        except TypeError:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, sanitized)
+
+        suffix = f" reason={reason}" if reason else ""
+        logger.warning(f"[litepoke] 已清理非法 LLM history {removed} 条 id={cid}{suffix}")
+        return True
+
     def _get_llm_tooling(self) -> tuple[Any | None, Any | None]:
         """获取当前 AstrBot LLM 工具管理器和 ToolSet。
 
@@ -376,6 +460,8 @@ class LitePokePlugin(Star):
         else:
             history = []
 
+        history, removed_invalid = self._sanitize_llm_history(history)
+
         event_message = {
             "role": "user",
             "content": [
@@ -398,7 +484,8 @@ class LitePokePlugin(Star):
                 isinstance(last, dict)
                 and self._extract_text_from_content(last.get("content")) == poke_text
             ):
-                return True
+                if not removed_invalid:
+                    return True
 
         # AstrBot 可能已先把原始 ComponentType.Poke 作为一条空 user 消息写入 history。
         # 这里优先把最近的原始空 Poke 消息规范化为可读文本，避免一次戳被模型看成两条。
@@ -418,13 +505,15 @@ class LitePokePlugin(Star):
         try:
             await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
             action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
-            logger.debug(f"[litepoke] 已{action}到 conversation id={cid}")
+            suffix = f"，并清理非法 history {removed_invalid} 条" if removed_invalid else ""
+            logger.debug(f"[litepoke] 已{action}到 conversation id={cid}{suffix}")
             return True
         except TypeError:
             try:
                 await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
                 action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
-                logger.debug(f"[litepoke] 已{action}到 conversation id={cid}")
+                suffix = f"，并清理非法 history {removed_invalid} 条" if removed_invalid else ""
+                logger.debug(f"[litepoke] 已{action}到 conversation id={cid}{suffix}")
                 return True
             except Exception as e:
                 logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
@@ -925,6 +1014,11 @@ class LitePokePlugin(Star):
 
         if not event.get_group_id() and self.cfg.get("only_group", True):
             return
+
+        try:
+            await self._sanitize_current_conversation(event, reason="on_llm_request")
+        except Exception as e:
+            logger.debug(f"[litepoke] LLM 请求前清理 history 失败: {e}")
 
         # === 通道 1：PokeLog 统计（默认关闭）===
         # v1.3.4 起戳一戳事件已写入 conversation；PokeLog 仅保留统计能力，默认不再注入 prompt。
