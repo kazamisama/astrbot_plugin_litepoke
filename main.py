@@ -1238,7 +1238,6 @@ class LitePokePlugin(Star):
                 llm_prompt = prompt_template.format(poke_event=poke_text)
                 conversation = await self._get_conversation(event)
 
-                event.stop_event()
                 logger.info(
                     f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
                     "-> 直接请求 LLM 响应"

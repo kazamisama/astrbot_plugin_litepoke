@@ -2,6 +2,16 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.2] - 2026-06-09
+
+### Fixed
+- 修复 `respond_poked_mode=llm/replay` 下在 `yield event.request_llm(...)` 前提前 `event.stop_event()`，导致 OnLLMRequest 钩子后 ProcessStage 被终止、最终空响应的问题。
+- LLM 模式现在保持事件传播，由 AstrBot 原生 agent 流程完成 provider 请求和响应发送。
+
+### Changed
+- `metadata.yaml` version：v1.4.1 → v1.4.2
+
+---
 ## [v1.4.1] - 2026-06-09
 
 ### Fixed
