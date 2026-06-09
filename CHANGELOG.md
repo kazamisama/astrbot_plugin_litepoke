@@ -8,9 +8,15 @@ litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://k
 - 新增 conversation history 自修复：清理已残留的空 `assistant` 消息，以及没有匹配 `assistant.tool_calls` 的孤立 `tool` 消息，避免 OpenAI 兼容接口持续报 `Invalid assistant message: content or tool_calls must be set`。
 - bot 被戳写入戳一戳事件时会顺手清理当前 conversation 中的非法 LLM history，避免旧污染继续影响后续请求。
 - 普通 `on_llm_request` 前也会尝试清理当前 conversation，修复已经写进数据库的历史脏记录导致的持续复发。
+- 降低 bot 被戳主动回应时因主动请求携带历史/tool 消息而触发 OpenAI 兼容接口 400 的风险。
 
 ### Changed
+- bot 被戳后的非 CD 即时回应改为“poke 伪文字消息 + 最薄 `event.request_llm(prompt, session_id)`”链路，不再手动拼接 persona、conversation 和 tool_set。
+- CD 内行为保持为只写入 conversation，不主动触发回应。
 - `metadata.yaml` version：v1.3.15 → v1.3.16
+
+### Removed
+- 移除 notice 主动回应专用的 persona prompt 获取和 LLM tool_set 手动注入辅助逻辑，降低与 AstrBot 内部请求链路耦合。
 
 ---
 ## [v1.3.15] - 2026-06-09

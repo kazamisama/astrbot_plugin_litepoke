@@ -264,30 +264,6 @@ class LitePokePlugin(Star):
         _, conv = await self._get_conversation_with_id(event)
         return conv
 
-    async def _get_current_persona_prompt(self, event: AiocqhttpMessageEvent) -> str:
-        """获取当前会话的人格 system prompt。
-
-        主动戳一戳回应不能传完整 conversation（历史 tool 消息可能触发兼容接口 400），
-        但只传短 prompt 又会丢人格。这里单独取当前人格 prompt 作为 system_prompt。
-        """
-        try:
-            persona_mgr = getattr(self.context, "persona_manager", None)
-            if persona_mgr is None or not hasattr(persona_mgr, "get_default_persona_v3"):
-                return ""
-
-            persona = await persona_mgr.get_default_persona_v3(event.unified_msg_origin)
-            if not isinstance(persona, dict):
-                return ""
-
-            prompt = persona.get("prompt", "") or ""
-            if prompt:
-                name = persona.get("name", "default")
-                logger.debug(f"[litepoke] 已获取当前人格 prompt name={name} len={len(prompt)}")
-            return prompt
-        except Exception as e:
-            logger.warning(f"[litepoke] 获取当前人格 prompt 失败: {e}")
-            return ""
-
     @staticmethod
     def _extract_text_from_content(content: Any) -> str:
         """从 AstrBot/OpenAI 风格 content 中提取可读文本。"""
@@ -404,32 +380,6 @@ class LitePokePlugin(Star):
         suffix = f" reason={reason}" if reason else ""
         logger.warning(f"[litepoke] 已清理非法 LLM history {removed} 条 id={cid}{suffix}")
         return True
-
-    def _get_llm_tooling(self) -> tuple[Any | None, Any | None]:
-        """获取当前 AstrBot LLM 工具管理器和 ToolSet。
-
-        主动 notice 事件触发的 request_llm 不一定自动携带插件工具；显式传入
-        func_tool_manager/tool_set，确保 poke_user 和其他全局工具在本次请求中可用。
-        """
-        try:
-            if not hasattr(self.context, "get_llm_tool_manager"):
-                return None, None
-            func_tools_mgr = self.context.get_llm_tool_manager()
-            if func_tools_mgr is None:
-                return None, None
-
-            if hasattr(func_tools_mgr, "get_full_tool_set"):
-                tool_set = func_tools_mgr.get_full_tool_set()
-            else:
-                tool_set = func_tools_mgr
-
-            # 不在这里原地删除 inactive 工具。
-            # 某些 AstrBot 版本的 get_full_tool_set() 可能返回共享 ToolSet；
-            # 在 notice 主动回应链路里 remove_tool/remove_func 会污染后续普通 LLM 请求。
-            return func_tools_mgr, tool_set
-        except Exception as e:
-            logger.warning(f"[litepoke] 获取 LLM 工具集失败: {e}")
-            return None, None
 
     async def _append_poke_event_to_conversation(
         self,
@@ -1220,30 +1170,23 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 主动调 LLM：不要把完整 conversation 传给 notice 事件触发的主动请求。
-            # 戳一戳事件仍会先写入官方 conversation，供后续普通聊天读取；
-            # 但当场回应只传当前 poke_event prompt + persona，避免历史里残留的空 assistant/tool
-            # 消息重新触发 OpenAI 兼容接口 400（content or tool_calls must be set）。
+            # 非 CD：把 poke 伪造成一条可读文字输入，交给 AstrBot 的 LLM 请求默认链路。
+            # CD 内已在上方写入 conversation 后 return；这里不再手动拼 persona/tool_set/conversation，
+            # 避免 notice 事件主动请求链路越来越重。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
                 prompt = prompt_template.format(poke_event=poke_text)
-                system_prompt = await self._get_current_persona_prompt(event)
-                func_tools_mgr, tool_set = self._get_llm_tooling()
 
                 self._last_respond_poked = time.time()
                 logger.info(
-                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} -> 主动调 LLM "
-                    "conversation=no"
+                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} -> 伪消息触发 LLM"
                 )
                 yield event.request_llm(
                     prompt=prompt,
                     session_id=event.session_id,
-                    system_prompt=system_prompt,
-                    func_tool_manager=func_tools_mgr,
-                    tool_set=tool_set,
                 )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
