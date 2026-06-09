@@ -157,7 +157,7 @@
     },
     "respond_poked_mode": {
         "description": "被戳响应模式",
-        "hint": "direct=直接发送表情/文字回退，最稳定；replay=伪造成普通消息重投递，尝试走标准 LLM pipeline",
+        "hint": "direct=直接发送表情/文字回退，最稳定；llm/replay=直接走 AstrBot 原生 LLM 请求链，让模型按人设回应",
         "type": "string",
         "default": "direct"
     },

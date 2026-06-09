@@ -1228,33 +1228,29 @@ class LitePokePlugin(Star):
                 )
                 return
 
-            # replay 模式：把 poke 伪造成普通文字消息，重新投递到 AstrBot 事件队列。
-            # 这样群聊/私聊都走标准消息 pipeline，而不是在 notice 事件里手动 request_llm。
+            # llm/replay 模式：直接走 AstrBot 原生 LLM 请求链。
+            # 旧版 put_nowait 伪消息在部分 pipeline 中只会触发插件监听，不会进入核心 LLM 回复阶段。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
-                replay_text = prompt_template.format(poke_event=poke_text)
+                llm_prompt = prompt_template.format(poke_event=poke_text)
+                conversation = await self._get_conversation(event)
 
-                replayed = await self._replay_poke_as_message(event, replay_text)
+                event.stop_event()
                 logger.info(
                     f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
-                    f"-> 伪消息重投递 {'ok' if replayed else 'failed'}"
+                    "-> 直接请求 LLM 响应"
                 )
-                if not replayed:
-                    result = await self._send_fallback(event)
-                    event.stop_event()
-                    logger.info(
-                        f"[litepoke] 伪消息重投递失败，已直发回退响应: {result}"
-                    )
+                yield event.request_llm(prompt=llm_prompt, conversation=conversation)
             except Exception as e:
-                logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
+                logger.warning(f"[litepoke] 接管戳一戳 LLM 响应失败: {e}")
                 try:
                     result = await self._send_fallback(event)
                     event.stop_event()
                     logger.info(
-                        f"[litepoke] 接管戳一戳异常，已直发回退响应: {result}"
+                        f"[litepoke] LLM 响应失败，已直发回退响应: {result}"
                     )
                 except Exception as fallback_e:
                     logger.warning(f"[litepoke] 戳一戳回退响应失败: {fallback_e}")
