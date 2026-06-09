@@ -151,9 +151,15 @@
     },
     "respond_poked_enabled": {
         "description": "接管戳一戳响应（v1.3+）",
-        "hint": "开启后，bot 被戳时会主动调一次 LLM 回应，不依赖 chat_plus 的 bot_only 模式",
+        "hint": "开启后，bot 被戳时会主动响应，不依赖 chat_plus 的 bot_only 模式",
         "type": "bool",
         "default": true
+    },
+    "respond_poked_mode": {
+        "description": "被戳响应模式",
+        "hint": "direct=直接发送表情/文字回退，最稳定；replay=伪造成普通消息重投递，尝试走标准 LLM pipeline",
+        "type": "string",
+        "default": "direct"
     },
     "respond_poked_prob": {
         "description": "被戳响应概率（0-1）",

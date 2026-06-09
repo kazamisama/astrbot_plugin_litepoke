@@ -1212,7 +1212,23 @@ class LitePokePlugin(Star):
             if random.random() >= respond_prob:
                 return
 
-            # 非 CD：把 poke 伪造成普通文字消息，重新投递到 AstrBot 事件队列。
+            # 非 CD：默认直接发送回退表达，避免 notice 事件重投递后只走插件监听、没有触发 LLM。
+            # 如需继续尝试“伪消息 → 标准消息 pipeline → LLM”，可把 respond_poked_mode 设为 replay。
+            respond_mode = str(
+                self.cfg.get("respond_poked_mode", "direct") or "direct"
+            ).strip().lower()
+            self._last_respond_poked = time.time()
+
+            if respond_mode not in {"replay", "llm"}:
+                result = await self._send_fallback(event)
+                event.stop_event()
+                logger.info(
+                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
+                    f"-> 直发回退响应: {result}"
+                )
+                return
+
+            # replay 模式：把 poke 伪造成普通文字消息，重新投递到 AstrBot 事件队列。
             # 这样群聊/私聊都走标准消息 pipeline，而不是在 notice 事件里手动 request_llm。
             try:
                 prompt_template = self.cfg.get(
@@ -1221,14 +1237,27 @@ class LitePokePlugin(Star):
                 )
                 replay_text = prompt_template.format(poke_event=poke_text)
 
-                self._last_respond_poked = time.time()
                 replayed = await self._replay_poke_as_message(event, replay_text)
                 logger.info(
                     f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
                     f"-> 伪消息重投递 {'ok' if replayed else 'failed'}"
                 )
+                if not replayed:
+                    result = await self._send_fallback(event)
+                    event.stop_event()
+                    logger.info(
+                        f"[litepoke] 伪消息重投递失败，已直发回退响应: {result}"
+                    )
             except Exception as e:
                 logger.warning(f"[litepoke] 接管戳一戳失败: {e}")
+                try:
+                    result = await self._send_fallback(event)
+                    event.stop_event()
+                    logger.info(
+                        f"[litepoke] 接管戳一戳异常，已直发回退响应: {result}"
+                    )
+                except Exception as fallback_e:
+                    logger.warning(f"[litepoke] 戳一戳回退响应失败: {fallback_e}")
             return
 
         # 概率跟戳只支持群聊；私聊中不是 bot 被戳/不是 bot 发出的 poke，到这里直接结束。
