@@ -2,6 +2,21 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.3.13] - 2026-06-09
+
+### Fixed
+- PokeLog 写盘和记录时会按 `poke_log_window` 裁剪 `recent`，避免默认关闭统计注入时 recent 长期累积到 JSON。
+- `_get_llm_tooling()` 不再原地删除 inactive 工具，避免主动 notice LLM 链路污染全局 ToolSet。
+- incoming/outgoing 戳一戳 history 增加延迟清理补偿，降低 AstrBot 原始 Poke 写入时序导致的重复上下文/残留 outgoing 空消息风险。
+- 自定义 `poke_log_path` 现在会尝试创建父目录。
+- meme 索引缓存会感知 emotion 子目录 mtime，运行中往已有标签目录加图也能刷新。
+- 配置数字项读取增加容错和范围夹取，配置损坏时降级默认值而不是让事件处理链抛异常。
+
+### Changed
+- 拆分工具戳、概率跟戳、bot 被戳主动回应的 CD 时间戳，避免 `_last_any_poke` 混用导致不同动作互相压制。
+- `metadata.yaml` version：v1.3.12 → v1.3.13
+
+---
 ## [v1.3.12] - 2026-06-09
 
 ### Changed

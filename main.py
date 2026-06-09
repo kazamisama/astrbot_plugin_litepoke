@@ -136,8 +136,10 @@ class LitePokePlugin(Star):
         super().__init__(context)
         self.cfg = config
 
-        # 最近一次主动动作时间：用于跟戳 / 被戳主动回应防刷屏
-        self._last_any_poke: float = 0.0
+        # 分开记录不同主动动作的时间，避免工具戳、跟戳、被戳回应互相误伤 CD
+        self._last_tool_poke: float = 0.0
+        self._last_follow_poke: float = 0.0
+        self._last_respond_poked: float = 0.0
 
         # 引导CD：{ scope: last_guide_time }
         self._guide_last: dict[str, float] = defaultdict(float)
@@ -157,6 +159,50 @@ class LitePokePlugin(Star):
 
         # 启动时从 JSON 恢复 PokeLog
         self._load_poke_log()
+
+    @staticmethod
+    def _clamp(value: float, min_value: float | None = None, max_value: float | None = None) -> float:
+        if min_value is not None:
+            value = max(min_value, value)
+        if max_value is not None:
+            value = min(max_value, value)
+        return value
+
+    def _cfg_float(
+        self,
+        key: str,
+        default: float,
+        *,
+        min_value: float | None = None,
+        max_value: float | None = None,
+    ) -> float:
+        """读取 float 配置，配置损坏时降级默认值，避免事件处理链炸掉。"""
+        try:
+            value = float(self.cfg.get(key, default))
+        except (TypeError, ValueError):
+            logger.warning(f"[litepoke] 配置 {key} 不是有效数字，使用默认值 {default}")
+            value = float(default)
+        return self._clamp(value, min_value, max_value)
+
+    def _cfg_int(
+        self,
+        key: str,
+        default: int,
+        *,
+        min_value: int | None = None,
+        max_value: int | None = None,
+    ) -> int:
+        """读取 int 配置，配置损坏时降级默认值。"""
+        try:
+            value = int(self.cfg.get(key, default))
+        except (TypeError, ValueError):
+            logger.warning(f"[litepoke] 配置 {key} 不是有效整数，使用默认值 {default}")
+            value = int(default)
+        if min_value is not None:
+            value = max(min_value, value)
+        if max_value is not None:
+            value = min(max_value, value)
+        return value
 
     # ===================== 内部：戳一戳事件文本构造（移植 chat_plus） =====================
 
@@ -293,17 +339,9 @@ class LitePokePlugin(Star):
             else:
                 tool_set = func_tools_mgr
 
-            tools = getattr(tool_set, "tools", None)
-            if tools is None:
-                tools = getattr(tool_set, "func_list", None)
-            if tools is not None:
-                for tool in list(tools):
-                    if hasattr(tool, "active") and not tool.active:
-                        if hasattr(tool_set, "remove_tool"):
-                            tool_set.remove_tool(tool.name)
-                        elif hasattr(tool_set, "remove_func"):
-                            tool_set.remove_func(tool.name)
-
+            # 不在这里原地删除 inactive 工具。
+            # 某些 AstrBot 版本的 get_full_tool_set() 可能返回共享 ToolSet；
+            # 在 notice 主动回应链路里 remove_tool/remove_func 会污染后续普通 LLM 请求。
             return func_tools_mgr, tool_set
         except Exception as e:
             logger.warning(f"[litepoke] 获取 LLM 工具集失败: {e}")
@@ -443,10 +481,110 @@ class LitePokePlugin(Star):
         logger.debug(f"[litepoke] 已删除原始 outgoing 戳一戳 history id={cid}{suffix}")
         return True
 
+    async def _delayed_cleanup_poke_history(
+        self,
+        event: AiocqhttpMessageEvent,
+        *,
+        poke_text: str = "",
+        reason: str = "",
+        delay: float = 0.3,
+    ) -> None:
+        """延迟清理原始 Poke history，补偿 AstrBot 写 conversation 的时序差异。"""
+        try:
+            await asyncio.sleep(delay)
+            if poke_text:
+                await self._normalize_recent_poke_history(event, poke_text, reason=reason)
+            else:
+                await self._drop_recent_raw_poke_from_conversation(event, reason=reason)
+        except Exception as e:
+            logger.debug(f"[litepoke] 延迟清理 Poke history 失败: {e}")
+
+    async def _normalize_recent_poke_history(
+        self,
+        event: AiocqhttpMessageEvent,
+        poke_text: str,
+        *,
+        reason: str = "",
+    ) -> bool:
+        """把最近原始 Poke 消息规范化，并清掉同一事件附近的重复空 Poke。"""
+        if not poke_text:
+            return False
+
+        cid, conv = await self._get_conversation_with_id(event)
+        if not cid or conv is None:
+            return False
+
+        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if isinstance(raw_history, str):
+            try:
+                history = json.loads(raw_history)
+            except Exception:
+                history = []
+        elif isinstance(raw_history, list):
+            history = list(raw_history)
+        else:
+            history = []
+
+        if not history:
+            return False
+
+        event_message = {
+            "role": "user",
+            "content": [{"type": "text", "text": poke_text}],
+            "metadata": {
+                "source": "litepoke",
+                "event_type": "poke",
+                "timestamp": time.time(),
+            },
+        }
+
+        changed = False
+        seen_litepoke = False
+        # 只动最近几条，避免误删很久以前的真实上下文。
+        start = max(0, len(history) - 8)
+        for idx in range(len(history) - 1, start - 1, -1):
+            msg = history[idx]
+            text = self._extract_text_from_content(msg.get("content") if isinstance(msg, dict) else None)
+            is_same_litepoke = (
+                isinstance(msg, dict)
+                and msg.get("role") == "user"
+                and text == poke_text
+            )
+            if is_same_litepoke:
+                if seen_litepoke:
+                    del history[idx]
+                    changed = True
+                else:
+                    seen_litepoke = True
+                continue
+
+            if not self._is_raw_poke_history_message(msg):
+                continue
+
+            if seen_litepoke:
+                del history[idx]
+            else:
+                history[idx] = event_message
+                seen_litepoke = True
+            changed = True
+
+        if not changed:
+            return False
+
+        conv_mgr = self.context.conversation_manager
+        try:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
+        except TypeError:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
+
+        suffix = f" reason={reason}" if reason else ""
+        logger.debug(f"[litepoke] 已延迟规范化 Poke history id={cid}{suffix}")
+        return True
+
     # ===================== 内部：状态记录 =====================
 
     def _record_poke(self, scope: str, user_id: str) -> None:
-        self._last_any_poke = time.time()
+        self._last_tool_poke = time.time()
 
     # ===================== 内部：PokeLog 持久化 =====================
 
@@ -462,6 +600,10 @@ class LitePokePlugin(Star):
         configured = (self.cfg.get("poke_log_path", "") or "").strip()
         if configured:
             p = Path(configured).expanduser()
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"[litepoke] 创建 poke_log_path 父目录失败: {e}")
             self._poke_log_path = p
             return p
 
@@ -502,7 +644,10 @@ class LitePokePlugin(Star):
         try:
             self._poke_log.last_saved = time.time()
             # 写盘前清理
-            keep_days = int(self.cfg.get("poke_log_daily_keep_days", 7))
+            now = time.time()
+            window = self._cfg_int("poke_log_window", 60, min_value=1)
+            keep_days = self._cfg_int("poke_log_daily_keep_days", 7, min_value=0)
+            self._poke_log.prune_recent(now, window)
             self._poke_log.prune_daily(keep_days)
             p.write_text(
                 json.dumps(self._poke_log.to_dict(), ensure_ascii=False, indent=2),
@@ -513,7 +658,7 @@ class LitePokePlugin(Star):
 
     def _maybe_periodic_save(self) -> None:
         """间隔写盘：每 poke_log_save_interval 秒写一次"""
-        interval = float(self.cfg.get("poke_log_save_interval", 60))
+        interval = self._cfg_float("poke_log_save_interval", 60, min_value=1)
         if time.time() - self._poke_log.last_saved >= interval:
             self._save_poke_log()
 
@@ -564,12 +709,14 @@ class LitePokePlugin(Star):
             return
 
         try:
-            current_mtime = meme_dir.stat().st_mtime
+            mtimes = [meme_dir.stat().st_mtime]
+            mtimes.extend(sub.stat().st_mtime for sub in meme_dir.iterdir() if sub.is_dir())
+            current_mtime = max(mtimes)
         except OSError:
             self._meme_index = {}
             return
 
-        # 如果目录没变化，跳过扫描
+        # 如果根目录和子目录都没变化，跳过扫描
         if current_mtime == self._meme_index_mtime and self._meme_index:
             return
 
@@ -636,7 +783,7 @@ class LitePokePlugin(Star):
                 logger.warning(f"[litepoke] 发meme失败: {e}")
 
         # 尝试 2：QQ face（不是所有平台都支持）
-        face_id = int(self.cfg.get("fallback_face_id", 0))
+        face_id = self._cfg_int("fallback_face_id", 0, min_value=0)
         if face_id > 0:
             try:
                 chain = MessageChain([Face(id=face_id)])
@@ -710,14 +857,14 @@ class LitePokePlugin(Star):
 
         # === 分支 A：aiocqhttp 真戳 ===
         if is_aiocqhttp and group_id:
-            max_times = int(self.cfg.get("poke_max_times", 3))
+            max_times = self._cfg_int("poke_max_times", 3, min_value=1)
             try:
                 times = int(times)
             except (TypeError, ValueError):
                 times = 1
             times = max(1, min(times, max_times))
 
-            interval = float(self.cfg.get("poke_interval", 0.5))
+            interval = self._cfg_float("poke_interval", 0.5, min_value=0)
             success_count = 0
             last_err: str | None = None
             for i in range(times):
@@ -788,7 +935,7 @@ class LitePokePlugin(Star):
             return
 
         scope = event.get_group_id() or "_private"
-        guide_cd = float(self.cfg.get("guide_cd", 30))
+        guide_cd = self._cfg_float("guide_cd", 30, min_value=0)
         if time.time() - self._guide_last[scope] < guide_cd:
             return
         self._guide_last[scope] = time.time()
@@ -809,9 +956,9 @@ class LitePokePlugin(Star):
         只在 PokeLog 有累积时返回非空字符串。
         消费后清空 recent（避免重复注入）。
         """
-        window = int(self.cfg.get("poke_log_window", 60))
+        window = self._cfg_int("poke_log_window", 60, min_value=1)
         self._poke_log.prune_recent(time.time(), window)
-        keep_days = int(self.cfg.get("poke_log_daily_keep_days", 7))
+        keep_days = self._cfg_int("poke_log_daily_keep_days", 7, min_value=0)
         self._poke_log.prune_daily(keep_days)
 
         recent = self._poke_log.consume_recent()
@@ -869,7 +1016,7 @@ class LitePokePlugin(Star):
             self._vibe[gid] = vibe
 
         now = time.time()
-        window = int(self.cfg.get("vibe_window", 60))
+        window = self._cfg_int("vibe_window", 60, min_value=1)
         vibe.recent_msgs.append(now)
         vibe.last_msg_sender = str(event.get_sender_id())
         vibe.prune(now, window)
@@ -916,12 +1063,20 @@ class LitePokePlugin(Star):
         # bot 自己发出的戳一戳是 outgoing 动作，不应作为新的 user 输入进入上下文。
         # 注意：这里必须早于 follow_enabled；follow_enabled 只控制概率跟戳，不控制清理 outgoing notice。
         if user_id and self_id and user_id == self_id:
-            await self._drop_recent_raw_poke_from_conversation(event, reason="bot_outgoing_poke")
+            removed = await self._drop_recent_raw_poke_from_conversation(event, reason="bot_outgoing_poke")
+            if not removed:
+                asyncio.create_task(
+                    self._delayed_cleanup_poke_history(event, reason="bot_outgoing_poke")
+                )
             return
 
         # bot 自己被戳 → 累积 PokeLog + 写入上下文 + 可选主动调 LLM 回应
         if target_id and self_id and target_id == self_id:
             self._poke_log.record(str(user_id), time.time())
+            self._poke_log.prune_recent(
+                time.time(),
+                self._cfg_int("poke_log_window", 60, min_value=1),
+            )
             self._maybe_periodic_save()
 
             # 先构造并写入 poke 事件：respond_poked_cd 只控制是否主动调 LLM，
@@ -940,19 +1095,25 @@ class LitePokePlugin(Star):
             if not poke_text:
                 return
             await self._append_poke_event_to_conversation(event, poke_text)
+            asyncio.create_task(
+                self._delayed_cleanup_poke_history(
+                    event,
+                    poke_text=poke_text,
+                    reason="incoming_poke",
+                )
+            )
 
             # 接管：主动触发 LLM 回应（v1.3.0+）
             if not self.cfg.get("respond_poked_enabled", True):
                 return
 
             # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
-            respond_cd = float(self.cfg.get("respond_poked_cd", 10))
-            if time.time() - self._last_any_poke < respond_cd:
+            respond_cd = self._cfg_float("respond_poked_cd", 10, min_value=0)
+            if time.time() - self._last_respond_poked < respond_cd:
                 return
 
             # 概率控制
-            respond_prob = float(self.cfg.get("respond_poked_prob", 1.0))
-            respond_prob = max(0.0, min(respond_prob, 1.0))
+            respond_prob = self._cfg_float("respond_poked_prob", 1.0, min_value=0.0, max_value=1.0)
             if respond_prob <= 0:
                 return
             if random.random() >= respond_prob:
@@ -973,7 +1134,7 @@ class LitePokePlugin(Star):
                 system_prompt = "" if conversation is not None else await self._get_current_persona_prompt(event)
                 func_tools_mgr, tool_set = self._get_llm_tooling()
 
-                self._last_any_poke = time.time()
+                self._last_respond_poked = time.time()
                 logger.info(
                     f"[litepoke] 接管戳一戳：group={group_id} sender={user_id} -> 主动调 LLM "
                     f"conversation={'yes' if conversation is not None else 'no'}"
@@ -1001,14 +1162,13 @@ class LitePokePlugin(Star):
             return
 
         # 概率判定
-        prob = float(self.cfg.get("follow_prob", 0.1))
-        prob = max(0.0, min(prob, 1.0))
+        prob = self._cfg_float("follow_prob", 0.1, min_value=0.0, max_value=1.0)
         if prob <= 0:
             return
 
         # CD 兜底：避免群内连续戳一戳事件时连续跟戳
-        follow_cd = float(self.cfg.get("follow_cd", 3))
-        if time.time() - self._last_any_poke < follow_cd:
+        follow_cd = self._cfg_float("follow_cd", 3, min_value=0)
+        if time.time() - self._last_follow_poke < follow_cd:
             return
 
         # === vibe 决策：用群内滑动窗口调整概率 ===
@@ -1022,13 +1182,13 @@ class LitePokePlugin(Star):
                 group_id=int(group_id),
                 user_id=int(target_id),
             )
-            self._last_any_poke = time.time()
+            self._last_follow_poke = time.time()
             # 记录到 vibe
             vibe = self._vibe.get(gid)
             if vibe is None:
                 vibe = GroupVibe()
                 self._vibe[gid] = vibe
-            window = int(self.cfg.get("vibe_window", 60))
+            window = self._cfg_int("vibe_window", 60, min_value=1)
             vibe.recent_pokes.append(time.time())
             vibe.last_poke_target = str(target_id)
             vibe.prune(time.time(), window)
@@ -1051,7 +1211,7 @@ class LitePokePlugin(Star):
         if vibe is None:
             return base_prob, "no_vibe"
 
-        window = int(self.cfg.get("vibe_window", 60))
+        window = self._cfg_int("vibe_window", 60, min_value=1)
         now = time.time()
         vibe.prune(now, window)
 
@@ -1060,9 +1220,9 @@ class LitePokePlugin(Star):
         poke_count = len(vibe.recent_pokes)
         reason_parts: list[str] = []
 
-        active_threshold = int(self.cfg.get("vibe_active_threshold", 5))
-        quiet_threshold = int(self.cfg.get("vibe_quiet_threshold", 1))
-        max_in_window = int(self.cfg.get("vibe_max_in_window", 1))
+        active_threshold = self._cfg_int("vibe_active_threshold", 5, min_value=0)
+        quiet_threshold = self._cfg_int("vibe_quiet_threshold", 1, min_value=0)
+        max_in_window = self._cfg_int("vibe_max_in_window", 1, min_value=0)
 
         # 规则 1：窗口内跟戳次数已达上限 → 跳过
         if poke_count >= max_in_window:
