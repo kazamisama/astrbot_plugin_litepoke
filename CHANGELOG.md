@@ -2,6 +2,21 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.3] - 2026-06-12
+
+### Added
+- 新增 `debug_diagnostics` 配置项。开启后会输出 `[litepoke][diag]` 诊断日志，标明 bot 被戳响应/群内跟戳/PokeLog 持久化的跳过或降级原因，例如 `cooldown`、`prob_miss`、`private_disabled`、`path_unavailable`。
+- PokeLog JSON 新增 `schema_version` 字段，后续格式演进时可做兼容判断。
+
+### Changed
+- PokeLog 保存改为临时文件写入后原子替换，降低异常重启/写盘中断导致 JSON 半截损坏的概率。
+- PokeLog 加载时会校验并清洗 `recent` / `daily` 条目，单条坏记录会被跳过，不再拖垮整份日志。
+- `metadata.yaml` version：v1.4.2 → v1.4.3
+
+### Fixed
+- PokeLog 加载失败时会把损坏文件移动为 `.corrupt.<timestamp>` 备份，再用空日志继续运行，避免坏 JSON 导致每次启动都重复报错。
+
+---
 ## [v1.4.2] - 2026-06-09
 
 ### Fixed

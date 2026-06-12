@@ -37,6 +37,9 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 # 表情文件后缀
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
+# PokeLog 持久化格式版本。旧版本 JSON 没有该字段，加载时会按 v0 兼容。
+POKE_LOG_SCHEMA_VERSION = 1
+
 
 @dataclass
 class GroupVibe:
@@ -118,6 +121,7 @@ class PokeLog:
 
     def to_dict(self) -> dict:
         return {
+            "schema_version": POKE_LOG_SCHEMA_VERSION,
             "recent": [list(item) for item in self.recent],
             "daily": self.daily,
             "last_saved": self.last_saved,
@@ -125,10 +129,37 @@ class PokeLog:
 
     @classmethod
     def from_dict(cls, data: dict) -> "PokeLog":
+        if not isinstance(data, dict):
+            raise ValueError("PokeLog data must be a JSON object")
+
+        recent_items: deque = deque()
+        for item in data.get("recent", []):
+            try:
+                sender, ts = item
+                recent_items.append((str(sender), float(ts)))
+            except (TypeError, ValueError):
+                # 跳过单条损坏 recent，不让整份日志报废。
+                continue
+
+        daily: dict[str, dict[str, int]] = {}
+        raw_daily = data.get("daily", {})
+        if isinstance(raw_daily, dict):
+            for day, counts in raw_daily.items():
+                if not isinstance(counts, dict):
+                    continue
+                day_counts: dict[str, int] = {}
+                for sender, count in counts.items():
+                    try:
+                        day_counts[str(sender)] = max(0, int(count))
+                    except (TypeError, ValueError):
+                        continue
+                if day_counts:
+                    daily[str(day)] = day_counts
+
         return cls(
-            recent=deque(tuple(item) for item in data.get("recent", [])),
-            daily={k: dict(v) for k, v in data.get("daily", {}).items()},
-            last_saved=float(data.get("last_saved", 0.0)),
+            recent=recent_items,
+            daily=daily,
+            last_saved=float(data.get("last_saved", 0.0) or 0.0),
         )
 
 
@@ -204,6 +235,18 @@ class LitePokePlugin(Star):
         if max_value is not None:
             value = min(max_value, value)
         return value
+
+    def _diagnose(self, action: str, reason: str, **fields: Any) -> None:
+        """按需输出诊断日志，方便排查一次戳一戳为什么被跳过/降级。"""
+        if not self.cfg.get("debug_diagnostics", False):
+            return
+        details = " ".join(
+            f"{key}={value}"
+            for key, value in fields.items()
+            if value is not None and value != ""
+        )
+        suffix = f" {details}" if details else ""
+        logger.info(f"[litepoke][diag] action={action} reason={reason}{suffix}")
 
     # ===================== 内部：戳一戳事件文本构造（移植 chat_plus） =====================
 
@@ -699,26 +742,45 @@ class LitePokePlugin(Star):
 
     def _load_poke_log(self) -> None:
         if not self.cfg.get("poke_log_persist", True):
+            self._diagnose("poke_log_load", "persist_disabled")
             return
         p = self._resolve_poke_log_path()
-        if p is None or not p.is_file():
+        if p is None:
+            self._diagnose("poke_log_load", "path_unavailable")
+            return
+        if not p.is_file():
+            self._diagnose("poke_log_load", "file_missing", path=p)
             return
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
+            schema_version = int(data.get("schema_version", 0) or 0) if isinstance(data, dict) else 0
+            if schema_version > POKE_LOG_SCHEMA_VERSION:
+                logger.warning(
+                    f"[litepoke] PokeLog schema_version={schema_version} 高于当前支持版本 "
+                    f"{POKE_LOG_SCHEMA_VERSION}，将尝试兼容加载"
+                )
             self._poke_log = PokeLog.from_dict(data)
             logger.info(
                 f"[litepoke] PokeLog 已加载：recent={len(self._poke_log.recent)}, "
-                f"daily_keys={len(self._poke_log.daily)}"
+                f"daily_keys={len(self._poke_log.daily)}, schema_version={schema_version}"
             )
         except Exception as e:
             logger.warning(f"[litepoke] 加载 PokeLog 失败: {e}")
+            try:
+                corrupt_path = p.with_name(f"{p.name}.corrupt.{int(time.time())}")
+                p.replace(corrupt_path)
+                logger.warning(f"[litepoke] 已保留损坏 PokeLog: {corrupt_path}")
+            except Exception as move_e:
+                logger.warning(f"[litepoke] 保留损坏 PokeLog 失败: {move_e}")
             self._poke_log = PokeLog()
 
     def _save_poke_log(self) -> None:
         if not self.cfg.get("poke_log_persist", True):
+            self._diagnose("poke_log_save", "persist_disabled")
             return
         p = self._resolve_poke_log_path()
         if p is None:
+            self._diagnose("poke_log_save", "path_unavailable")
             return
         try:
             self._poke_log.last_saved = time.time()
@@ -728,9 +790,17 @@ class LitePokePlugin(Star):
             keep_days = self._cfg_int("poke_log_daily_keep_days", 7, min_value=0)
             self._poke_log.prune_recent(now, window)
             self._poke_log.prune_daily(keep_days)
-            p.write_text(
-                json.dumps(self._poke_log.to_dict(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
+
+            tmp_path = p.with_name(f"{p.name}.tmp")
+            payload = json.dumps(self._poke_log.to_dict(), ensure_ascii=False, indent=2)
+            tmp_path.write_text(payload, encoding="utf-8")
+            tmp_path.replace(p)
+            self._diagnose(
+                "poke_log_save",
+                "saved",
+                path=p,
+                recent=len(self._poke_log.recent),
+                daily_keys=len(self._poke_log.daily),
             )
         except Exception as e:
             logger.warning(f"[litepoke] 保存 PokeLog 失败: {e}")
@@ -1151,6 +1221,12 @@ class LitePokePlugin(Star):
 
         # 私聊开关：与 poke_user 工具保持一致。
         if is_private and self.cfg.get("only_group", True):
+            self._diagnose(
+                "incoming_poke",
+                "private_disabled",
+                sender=user_id,
+                target=target_id,
+            )
             return
 
         # bot 自己发出的戳一戳是 outgoing 动作，不应作为新的 user 输入进入上下文。
@@ -1161,6 +1237,14 @@ class LitePokePlugin(Star):
                 asyncio.create_task(
                     self._delayed_cleanup_poke_history(event, reason="bot_outgoing_poke")
                 )
+            self._diagnose(
+                "outgoing_poke",
+                "cleanup_only",
+                scope=group_id or "_private",
+                sender=user_id,
+                target=target_id,
+                removed_raw=removed,
+            )
             return
 
         # bot 自己被戳 → 累积 PokeLog + 写入上下文 + 可选主动调 LLM 回应
@@ -1186,8 +1270,24 @@ class LitePokePlugin(Star):
             }
             poke_text = self._build_poke_event_text(poke_info)
             if not poke_text:
+                self._diagnose(
+                    "respond_poked",
+                    "empty_poke_text",
+                    scope=group_id or "_private",
+                    sender=user_id,
+                    target=target_id,
+                )
                 return
-            await self._append_poke_event_to_conversation(event, poke_text)
+            wrote_context = await self._append_poke_event_to_conversation(event, poke_text)
+            self._diagnose(
+                "respond_poked",
+                "recorded",
+                scope=group_id or "_private",
+                sender=user_id,
+                wrote_context=wrote_context,
+                recent=len(self._poke_log.recent),
+                today=self._poke_log.total_today(),
+            )
             asyncio.create_task(
                 self._delayed_cleanup_poke_history(
                     event,
@@ -1198,18 +1298,49 @@ class LitePokePlugin(Star):
 
             # 接管：主动触发 LLM 回应（v1.3.0+）
             if not self.cfg.get("respond_poked_enabled", True):
+                self._diagnose(
+                    "respond_poked",
+                    "disabled",
+                    scope=group_id or "_private",
+                    sender=user_id,
+                )
                 return
 
             # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
             respond_cd = self._cfg_float("respond_poked_cd", 10, min_value=0)
-            if time.time() - self._last_respond_poked < respond_cd:
+            elapsed = time.time() - self._last_respond_poked
+            if elapsed < respond_cd:
+                self._diagnose(
+                    "respond_poked",
+                    "cooldown",
+                    scope=group_id or "_private",
+                    sender=user_id,
+                    elapsed=round(elapsed, 2),
+                    cd=respond_cd,
+                )
                 return
 
             # 概率控制
             respond_prob = self._cfg_float("respond_poked_prob", 1.0, min_value=0.0, max_value=1.0)
             if respond_prob <= 0:
+                self._diagnose(
+                    "respond_poked",
+                    "prob_zero",
+                    scope=group_id or "_private",
+                    sender=user_id,
+                    prob=respond_prob,
+                )
                 return
-            if random.random() >= respond_prob:
+            roll = random.random()
+            if roll >= respond_prob:
+                self._diagnose(
+                    "respond_poked",
+                    "prob_miss",
+                    scope=group_id or "_private",
+                    sender=user_id,
+                    roll=round(roll, 4),
+                    prob=respond_prob,
+                )
                 return
 
             # 非 CD：默认直接发送回退表达，避免 notice 事件重投递后只走插件监听、没有触发 LLM。
@@ -1257,24 +1388,67 @@ class LitePokePlugin(Star):
 
         # 概率跟戳只支持群聊；私聊中不是 bot 被戳/不是 bot 发出的 poke，到这里直接结束。
         if is_private:
+            self._diagnose(
+                "follow_poke",
+                "private_unsupported",
+                sender=user_id,
+                target=target_id,
+            )
             return
 
         if not self.cfg.get("follow_enabled", True):
+            self._diagnose(
+                "follow_poke",
+                "disabled",
+                group=gid,
+                sender=user_id,
+                target=target_id,
+            )
             return
 
         # 概率判定
         prob = self._cfg_float("follow_prob", 0.1, min_value=0.0, max_value=1.0)
         if prob <= 0:
+            self._diagnose(
+                "follow_poke",
+                "prob_zero",
+                group=gid,
+                sender=user_id,
+                target=target_id,
+                prob=prob,
+            )
             return
 
         # CD 兜底：避免群内连续戳一戳事件时连续跟戳
         follow_cd = self._cfg_float("follow_cd", 3, min_value=0)
-        if time.time() - self._last_follow_poke < follow_cd:
+        elapsed = time.time() - self._last_follow_poke
+        if elapsed < follow_cd:
+            self._diagnose(
+                "follow_poke",
+                "cooldown",
+                group=gid,
+                sender=user_id,
+                target=target_id,
+                elapsed=round(elapsed, 2),
+                cd=follow_cd,
+            )
             return
 
         # === vibe 决策：用群内滑动窗口调整概率 ===
         adjusted_prob, reason = self._vibe_adjust(gid, target_id, prob)
-        if random.random() >= adjusted_prob:
+        roll = random.random()
+        if roll >= adjusted_prob:
+            self._diagnose(
+                "follow_poke",
+                "prob_miss",
+                group=gid,
+                sender=user_id,
+                target=target_id,
+                roll=round(roll, 4),
+                base_prob=prob,
+                adjusted_prob=round(adjusted_prob, 4),
+                vibe_reason=reason,
+            )
             return
 
         # 跟戳

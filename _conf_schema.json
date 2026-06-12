@@ -149,6 +149,12 @@
         "type": "bool",
         "default": false
     },
+    "debug_diagnostics": {
+        "description": "启用诊断日志",
+        "hint": "开启后会在 AstrBot 日志输出 litepoke 跳过/降级原因，例如 CD、概率未命中、私聊禁用、PokeLog 保存路径不可用等；排查问题时开启，平时建议关闭",
+        "type": "bool",
+        "default": false
+    },
     "respond_poked_enabled": {
         "description": "接管戳一戳响应（v1.3+）",
         "hint": "开启后，bot 被戳时会主动响应，不依赖 chat_plus 的 bot_only 模式",

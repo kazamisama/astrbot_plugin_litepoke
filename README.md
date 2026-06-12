@@ -23,7 +23,9 @@
 | 限频 | 引导CD + 跟戳CD + 被戳主动响应CD；`poke_user` 工具本身不再做静默CD |
 | 失败回退 | meme → QQ face → 文字，三级降级 |
 | 群氛围决策 | 60s 滑动窗口，O(1) 规则调概率，**不调 LLM** |
-| 代码量 | 单文件约 540 行 |
+| PokeLog | JSON 持久化带 `schema_version`，保存采用临时文件原子替换，坏文件会保留为 `.corrupt.<timestamp>` |
+| 诊断日志 | 可选 `debug_diagnostics`，排查 CD、概率未命中、私聊禁用、路径不可用等跳过原因 |
+| 代码量 | 单文件，零依赖，易读易改 |
 
 ---
 
@@ -99,6 +101,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
 | `poke_log_save_interval` | 60 | 写盘间隔秒数 |
 | `poke_log_inject_enabled` | false | 是否把 PokeLog 统计注入 system_prompt，默认关闭 |
+| `debug_diagnostics` | false | 是否输出 `[litepoke][diag]` 诊断日志；排查问题时开启，平时建议关闭 |
 | `respond_poked_enabled` | true | 接管戳一戳响应开关 |
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
@@ -163,7 +166,7 @@ poke_user(user_id, times=1, emotion=None)
 - 想要"基本不跟戳"：`follow_prob = 0.02`
 - 完全关掉跟戳：`follow_enabled = false`
 
-**调试方法**：AstrBot 日志里搜 `[litepoke]`，DEBUG 级别会打印 `跟戳 group=... target=... reason=active(7),target_silent` 这种日志。修改 `astrbot_config.yaml` 把 litepoke 的日志级别调到 DEBUG。
+**调试方法**：排查“为什么没跟戳/没回应”时，先在插件配置里临时打开 `debug_diagnostics`，AstrBot 日志里搜 `[litepoke][diag]`。常见 `reason` 包括 `cooldown`、`prob_miss`、`disabled`、`private_disabled`、`path_unavailable`。正常运行时建议关掉，避免日志太碎。
 
 ### 5. PokeLog 累积日志（v1.2+）
 
