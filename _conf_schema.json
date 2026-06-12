@@ -1,18 +1,24 @@
 {
+    "only_group": {
+        "description": "【基础作用域】仅群聊生效",
+        "hint": "关闭后私聊也可以戳",
+        "type": "bool",
+        "default": true
+    },
     "poke_max_times": {
-        "description": "aiocqhttp 单次最大戳次数",
+        "description": "【LLM 主动戳】aiocqhttp 单次最大戳次数",
         "hint": "LLM 传入的 times 上限（仅对 aiocqhttp 平台生效）",
         "type": "int",
         "default": 3
     },
     "poke_interval": {
-        "description": "戳之间间隔（秒）",
+        "description": "【LLM 主动戳】戳之间间隔（秒）",
         "hint": "多次戳时，每次之间的间隔",
         "type": "float",
         "default": 0.5
     },
     "trigger_keywords": {
-        "description": "引导触发关键词",
+        "description": "【普通消息引导】引导触发关键词",
         "hint": "用户消息含其中任一关键词时，会注入引导提示让 LLM 考虑戳人。留空则不引导（仅靠 LLM 自主判断）",
         "type": "list",
         "default": [
@@ -24,171 +30,165 @@
         ]
     },
     "guide_cd": {
-        "description": "引导注入间隔（秒）",
+        "description": "【普通消息引导】引导注入间隔（秒）",
         "hint": "同一会话内，引导提示的最小注入间隔",
         "type": "int",
         "default": 30
     },
     "guide_prompt": {
-        "description": "普通消息引导提示词",
+        "description": "【普通消息引导】普通消息引导提示词",
         "hint": "用户普通消息命中关键词时附加到 system_prompt 的引导文本；仅用于提醒 LLM 可考虑 poke_user，不处理 bot 被戳事件",
         "type": "text",
         "default": "[轻量戳一戳提示] 如果当前对话氛围适合轻微互动，可以考虑调用 poke_user 工具；不要因为看到提示就强行调用。"
     },
-    "only_group": {
-        "description": "仅群聊生效",
-        "hint": "关闭后私聊也可以戳",
-        "type": "bool",
-        "default": true
-    },
     "enable_meme_fallback": {
-        "description": "非aiocqhttp平台启用meme回退",
+        "description": "【表情回退】非aiocqhttp平台启用meme回退",
         "hint": "在 webchat、telegram 等不支持真戳一戳的平台，用发送表情包来表达'戳'。依赖 meme_manager 插件",
         "type": "bool",
         "default": true
     },
     "meme_dir": {
-        "description": "meme表情包根目录",
+        "description": "【表情回退】meme表情包根目录",
         "hint": "留空则使用 litepoke 自己的数据目录 <plugin_data>/astrbot_plugin_litepoke/memes。子目录名 = emotion 标签名（baka/sad/angry 等），里面放图片就行",
         "type": "string",
         "default": ""
     },
     "default_emotion": {
-        "description": "默认meme标签",
+        "description": "【表情回退】默认meme标签",
         "hint": "没传 emotion 参数或标签不存在时使用的兜底标签",
         "type": "string",
         "default": "baka"
     },
     "fallback_face_id": {
-        "description": "meme不可用时的QQ face ID",
+        "description": "【表情回退】meme不可用时的QQ face ID",
         "hint": "meme目录为空时，发一个QQ原生face作为最后兜底。设为 0 关闭",
         "type": "int",
         "default": 0
     },
     "fallback_text": {
-        "description": "所有回退都不可用时的文字",
+        "description": "【表情回退】所有回退都不可用时的文字",
         "hint": "当 meme 和 face 都不可用时，发一句文字表达'想戳你'",
         "type": "string",
         "default": "（戳了你一下）"
     },
-    "follow_enabled": {
-        "description": "启用群内跟戳",
-        "hint": "关闭后不会跟着戳，只保留 LLM 自主调用 poke_user",
-        "type": "bool",
-        "default": true
-    },
-    "follow_prob": {
-        "description": "跟戳概率（0-1）",
-        "hint": "群里有人戳别人时，bot 跟戳的概率。0=从不跟戳，1=每次都跟戳。建议 0.05-0.2",
-        "type": "float",
-        "default": 0.1
-    },
-    "follow_cd": {
-        "description": "跟戳最小间隔（秒）",
-        "hint": "两次跟戳之间的最小间隔，防止群内短时间内连戳多人",
-        "type": "float",
-        "default": 3
-    },
-    "vibe_window": {
-        "description": "群内滑动窗口秒数",
-        "hint": "用于跟戳决策的滑动窗口长度。窗口外的事件会被清理",
-        "type": "int",
-        "default": 60
-    },
-    "vibe_active_threshold": {
-        "description": "群活跃阈值（窗口内消息数）",
-        "hint": "窗口内消息数 ≥ 此值算群活跃，跟戳概率上调到 ×1.5",
-        "type": "int",
-        "default": 5
-    },
-    "vibe_quiet_threshold": {
-        "description": "群冷清阈值（窗口内消息数）",
-        "hint": "窗口内消息数 < 此值算群冷清，跟戳概率下调到 ×0.3",
-        "type": "int",
-        "default": 1
-    },
-    "vibe_max_in_window": {
-        "description": "窗口内最大跟戳次数",
-        "hint": "滑动窗口内最多跟戳几次。超过则跳过这次跟戳",
-        "type": "int",
-        "default": 1
-    },
-    "poke_log_persist": {
-        "description": "持久化 PokeLog 到 JSON",
-        "hint": "关闭则 PokeLog 只在内存，重启即丢",
-        "type": "bool",
-        "default": true
-    },
-    "poke_log_path": {
-        "description": "PokeLog JSON 文件路径",
-        "hint": "留空使用默认 <plugin_data>/astrbot_plugin_litepoke/poke_log.json",
-        "type": "string",
-        "default": ""
-    },
-    "poke_log_window": {
-        "description": "戳一戳短期窗口（秒）",
-        "hint": "recent 队列保留多少秒内的事件。LLM 消费后清空",
-        "type": "int",
-        "default": 60
-    },
-    "poke_log_daily_keep_days": {
-        "description": "日累计保留天数",
-        "hint": "daily 字典保留多少天的数据。超过会被自动裁掉",
-        "type": "int",
-        "default": 7
-    },
-    "poke_log_save_interval": {
-        "description": "PokeLog 写盘间隔（秒）",
-        "hint": "每隔多少秒把内存里的 PokeLog 写一次盘",
-        "type": "int",
-        "default": 60
-    },
-    "poke_log_inject_enabled": {
-        "description": "注入 PokeLog 统计到提示词",
-        "hint": "开启后会把近期/当天戳一戳统计追加到 system_prompt。默认关闭；v1.3.4+ 已将 bot 被戳事件写入 conversation，通常不需要再注入统计块",
-        "type": "bool",
-        "default": false
-    },
-    "debug_diagnostics": {
-        "description": "启用诊断日志",
-        "hint": "开启后会在 AstrBot 日志输出 litepoke 跳过/降级原因，例如 CD、概率未命中、私聊禁用、PokeLog 保存路径不可用等；排查问题时开启，平时建议关闭",
-        "type": "bool",
-        "default": false
-    },
     "respond_poked_enabled": {
-        "description": "接管戳一戳响应（v1.3+）",
+        "description": "【bot 被戳回应】接管戳一戳响应（v1.3+）",
         "hint": "开启后，bot 被戳时会主动响应，不依赖 chat_plus 的 bot_only 模式",
         "type": "bool",
         "default": true
     },
     "respond_poked_mode": {
-        "description": "被戳响应模式",
+        "description": "【bot 被戳回应】被戳响应模式",
         "hint": "direct=直接发送表情/文字回退，最稳定；llm/replay=直接走 AstrBot 原生 LLM 请求链，让模型按人设回应",
         "type": "string",
         "default": "direct"
     },
     "respond_poked_prob": {
-        "description": "被戳响应概率（0-1）",
+        "description": "【bot 被戳回应】被戳响应概率（0-1）",
         "hint": "bot 被戳时，主动调 LLM 回应的概率。0=不响应，1=每次都响应",
         "type": "float",
         "default": 1.0
     },
     "respond_poked_cd": {
-        "description": "被戳响应 CD（秒）",
+        "description": "【bot 被戳回应】被戳响应 CD（秒）",
         "hint": "两次主动响应之间的最小间隔，防止群友狂戳 bot 时刷屏",
         "type": "float",
         "default": 10
     },
+    "respond_poked_write_context": {
+        "description": "【bot 被戳回应】被戳事件写入上下文",
+        "hint": "开启后，bot 被戳的 notice 事件会作为一条纯文本 user 消息写入官方 conversation，后续对话能自然感知该事件；不写入 tool/tool_calls",
+        "type": "bool",
+        "default": true
+    },
     "respond_poked_prompt": {
-        "description": "被戳响应 prompt 模板",
+        "description": "【bot 被戳回应】被戳响应 prompt 模板",
         "hint": "可用占位符 {poke_event}，会替换成戳一戳事件描述",
         "type": "string",
         "default": "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。"
     },
-    "respond_poked_write_context": {
-        "description": "被戳事件写入上下文",
-        "hint": "开启后，bot 被戳的 notice 事件会作为一条纯文本 user 消息写入官方 conversation，后续对话能自然感知该事件；不写入 tool/tool_calls",
+    "follow_enabled": {
+        "description": "【群内跟戳】启用群内跟戳",
+        "hint": "关闭后不会跟着戳，只保留 LLM 自主调用 poke_user",
         "type": "bool",
         "default": true
+    },
+    "follow_prob": {
+        "description": "【群内跟戳】跟戳概率（0-1）",
+        "hint": "群里有人戳别人时，bot 跟戳的概率。0=从不跟戳，1=每次都跟戳。建议 0.05-0.2",
+        "type": "float",
+        "default": 0.1
+    },
+    "follow_cd": {
+        "description": "【群内跟戳】跟戳最小间隔（秒）",
+        "hint": "两次跟戳之间的最小间隔，防止群内短时间内连戳多人",
+        "type": "float",
+        "default": 3
+    },
+    "vibe_window": {
+        "description": "【群氛围决策】群内滑动窗口秒数",
+        "hint": "用于跟戳决策的滑动窗口长度。窗口外的事件会被清理",
+        "type": "int",
+        "default": 60
+    },
+    "vibe_active_threshold": {
+        "description": "【群氛围决策】群活跃阈值（窗口内消息数）",
+        "hint": "窗口内消息数 ≥ 此值算群活跃，跟戳概率上调到 ×1.5",
+        "type": "int",
+        "default": 5
+    },
+    "vibe_quiet_threshold": {
+        "description": "【群氛围决策】群冷清阈值（窗口内消息数）",
+        "hint": "窗口内消息数 < 此值算群冷清，跟戳概率下调到 ×0.3",
+        "type": "int",
+        "default": 1
+    },
+    "vibe_max_in_window": {
+        "description": "【群氛围决策】窗口内最大跟戳次数",
+        "hint": "滑动窗口内最多跟戳几次。超过则跳过这次跟戳",
+        "type": "int",
+        "default": 1
+    },
+    "poke_log_persist": {
+        "description": "【PokeLog 统计】持久化 PokeLog 到 JSON",
+        "hint": "关闭则 PokeLog 只在内存，重启即丢",
+        "type": "bool",
+        "default": true
+    },
+    "poke_log_path": {
+        "description": "【PokeLog 统计】PokeLog JSON 文件路径",
+        "hint": "留空使用默认 <plugin_data>/astrbot_plugin_litepoke/poke_log.json",
+        "type": "string",
+        "default": ""
+    },
+    "poke_log_window": {
+        "description": "【PokeLog 统计】戳一戳短期窗口（秒）",
+        "hint": "recent 队列保留多少秒内的事件。LLM 消费后清空",
+        "type": "int",
+        "default": 60
+    },
+    "poke_log_daily_keep_days": {
+        "description": "【PokeLog 统计】日累计保留天数",
+        "hint": "daily 字典保留多少天的数据。超过会被自动裁掉",
+        "type": "int",
+        "default": 7
+    },
+    "poke_log_save_interval": {
+        "description": "【PokeLog 统计】PokeLog 写盘间隔（秒）",
+        "hint": "每隔多少秒把内存里的 PokeLog 写一次盘",
+        "type": "int",
+        "default": 60
+    },
+    "poke_log_inject_enabled": {
+        "description": "【PokeLog 统计】注入 PokeLog 统计到提示词",
+        "hint": "开启后会把近期/当天戳一戳统计追加到 system_prompt。默认关闭；v1.3.4+ 已将 bot 被戳事件写入 conversation，通常不需要再注入统计块",
+        "type": "bool",
+        "default": false
+    },
+    "debug_diagnostics": {
+        "description": "【诊断】启用诊断日志",
+        "hint": "开启后会在 AstrBot 日志输出 litepoke 跳过/降级原因，例如 CD、概率未命中、私聊禁用、PokeLog 保存路径不可用等；排查问题时开启，平时建议关闭",
+        "type": "bool",
+        "default": false
     }
 }

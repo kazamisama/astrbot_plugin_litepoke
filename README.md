@@ -73,40 +73,83 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 
 ## 配置项
 
-所有配置都在 AstrBot WebUI 的插件配置页里可调（首次启动后才会显示）。
+所有配置都在 AstrBot WebUI 的插件配置页里可调（首次启动后才会显示）。WebUI 里会按下方功能顺序展示；配置名保持不变，只调整顺序和说明前缀，兼容旧配置。
+
+### 基础作用域
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `only_group` | true | 是否仅在群聊生效；为 true 时私聊 `poke_user` 和私聊被戳主动回应都会关闭 |
+
+### LLM 主动戳
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `poke_max_times` | 3 | aiocqhttp 下 LLM 传入的 times 上限 |
 | `poke_interval` | 0.5 | 多次戳时每次间隔（秒） |
+
+### 普通消息引导
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
 | `trigger_keywords` | `["笨蛋","人机","机器人","bot","傻"]` | 命中即注入引导提示的关键词 |
 | `guide_cd` | 30 | 同一会话内引导提示最小间隔（秒） |
 | `guide_prompt` | 见配置 | 普通消息命中关键词时注入到 system_prompt 的轻量引导；不处理 bot 被戳事件 |
-| `only_group` | true | 是否仅在群聊生效；为 true 时私聊 `poke_user` 和私聊被戳主动回应都会关闭 |
+
+### 表情回退
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
 | `enable_meme_fallback` | true | 非 aiocqhttp 平台是否启用表情回退 |
 | `meme_dir` | 空 | 自定义表情根目录；留空 = 插件自带目录 |
 | `default_emotion` | `baka` | 默认 emotion 标签 |
 | `fallback_face_id` | 0 | meme 不可用时的 QQ face ID；0=关闭 |
 | `fallback_text` | `（戳了你一下）` | 所有回退都失败时的文字 |
+
+### bot 被戳回应
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `respond_poked_enabled` | true | 接管戳一戳响应开关 |
+| `respond_poked_mode` | `direct` | `direct`=直接表情/文字回退，最稳定；`llm`/`replay`=走 AstrBot 原生 LLM 请求链 |
+| `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
+| `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
+| `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation；CD 内只写入不即时回应 |
+| `respond_poked_prompt` | 见配置 | 被戳响应 prompt 模板；`llm`/`replay` 模式下使用 `{poke_event}` 占位符 |
+
+### 群内跟戳
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
 | `follow_enabled` | true | 是否启用群内跟戳 |
 | `follow_prob` | 0.1 | 跟戳基础概率（0-1），vibe 调整后会变 |
 | `follow_cd` | 3 | 两次跟戳之间最小间隔（秒） |
+
+### 群氛围决策
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
 | `vibe_window` | 60 | 群内滑动窗口秒数 |
 | `vibe_active_threshold` | 5 | 窗口内消息数 ≥ 此值算群活跃，跟戳概率 ×1.5 |
 | `vibe_quiet_threshold` | 1 | 窗口内消息数 < 此值算群冷清，跟戳概率 ×0.3 |
 | `vibe_max_in_window` | 1 | 窗口内最多跟戳几次 |
+
+### PokeLog 统计
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
 | `poke_log_persist` | true | 是否持久化 PokeLog 到 JSON |
 | `poke_log_path` | 空 | PokeLog JSON 路径；留空用自带 |
 | `poke_log_window` | 60 | 短期窗口秒数（recent 队列） |
 | `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
 | `poke_log_save_interval` | 60 | 写盘间隔秒数 |
 | `poke_log_inject_enabled` | false | 是否把 PokeLog 统计注入 system_prompt，默认关闭 |
+
+### 诊断
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
 | `debug_diagnostics` | false | 是否输出 `[litepoke][diag]` 诊断日志；排查问题时开启，平时建议关闭 |
-| `respond_poked_enabled` | true | 接管戳一戳响应开关 |
-| `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
-| `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
-| `respond_poked_prompt` | 见配置 | 被戳伪消息模板；非 CD 时会作为普通文字消息重投递到 AstrBot 事件队列 |
-| `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation；CD 内只写入不即时回应 |
 
 ---
 

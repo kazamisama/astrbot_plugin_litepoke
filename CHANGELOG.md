@@ -2,6 +2,15 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.4] - 2026-06-12
+
+### Changed
+- 重排 `_conf_schema.json` 配置项展示顺序，按“基础作用域 / LLM 主动戳 / 普通消息引导 / 表情回退 / bot 被戳回应 / 群内跟戳 / 群氛围决策 / PokeLog 统计 / 诊断”分块。
+- 配置项 `description` 增加轻量分组前缀，方便 AstrBot WebUI 中按功能识别；未新增假配置项，保持旧配置兼容。
+- README 配置项章节改为分块表格，并补全 `respond_poked_mode` 说明。
+- `metadata.yaml` version：v1.4.3 → v1.4.4
+
+---
 ## [v1.4.3] - 2026-06-12
 
 ### Added
