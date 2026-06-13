@@ -124,6 +124,8 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `follow_enabled` | true | 是否启用群内跟戳 |
 | `follow_prob` | 0.1 | 跟戳基础概率（0-1），vibe 调整后会变 |
 | `follow_cd` | 3 | 两次跟戳之间最小间隔（秒） |
+| `follow_trace_inject_enabled` | true | 是否把自动跟戳成功的概率命中原因短期注入给下一次 LLM 请求，用于解释“为什么戳他” |
+| `follow_trace_ttl` | 60 | 跟戳解释缓存保留秒数；过期未被消费会丢弃，只保存在内存 |
 
 ### 群氛围决策
 
@@ -209,7 +211,9 @@ poke_user(user_id, times=1, emotion=None)
 - 想要"基本不跟戳"：`follow_prob = 0.02`
 - 完全关掉跟戳：`follow_enabled = false`
 
-**调试方法**：排查“为什么没跟戳/没回应”时，先在插件配置里临时打开 `debug_diagnostics`，AstrBot 日志里搜 `[litepoke][diag]`。常见 `reason` 包括 `cooldown`、`prob_miss`、`disabled`、`private_disabled`、`path_unavailable`。正常运行时建议关掉，避免日志太碎。
+**跟戳解释**：自动跟戳成功后，插件会把一次短期解释记录放进内存缓存，并在下一次同群 LLM 请求前注入 system prompt。记录包含基础概率、群氛围调整后概率、随机数 roll 和 `vibe_reason`，所以 bot 可以回答“刚才为什么戳他”，而不是凭空编理由。注入后即消费，超过 `follow_trace_ttl` 未消费会丢弃；如果不想让模型感知自动跟戳，关闭 `follow_trace_inject_enabled`。
+
+**调试方法**：排查“为什么没跟戳/没回应”时，先在插件配置里临时打开 `debug_diagnostics`，AstrBot 日志里搜 `[litepoke][diag]`。常见 `reason` 包括 `hit`、`cooldown`、`prob_miss`、`disabled`、`private_disabled`、`path_unavailable`。正常运行时建议关掉，避免日志太碎。
 
 ### 5. PokeLog 累积日志（v1.2+）
 

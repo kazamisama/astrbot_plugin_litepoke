@@ -2,6 +2,19 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.5] - 2026-06-12
+
+### Added
+- 新增自动跟戳解释缓存。跟戳成功后会记录触发者、目标、基础概率、群氛围调整后概率、随机数 roll 和 `vibe_reason`，下一次同群 LLM 请求会短期注入解释，方便 bot 回答“为什么戳他”。
+- 新增 `follow_trace_inject_enabled` 配置项，控制是否注入自动跟戳解释，默认开启。
+- 新增 `follow_trace_ttl` 配置项，控制跟戳解释缓存保留秒数，默认 60 秒。
+- `debug_diagnostics` 开启时，跟戳成功会输出 `reason=hit` 以及 roll/base_prob/adjusted_prob/vibe_reason。
+
+### Changed
+- 自动跟戳仍不把 outgoing poke notice 当作 user message 写入 conversation，避免自我循环；解释信息仅作为短期 system prompt 注入并消费。
+- `metadata.yaml` version：v1.4.4 → v1.4.5
+
+---
 ## [v1.4.4] - 2026-06-12
 
 ### Changed

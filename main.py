@@ -63,6 +63,19 @@ class GroupVibe:
 
 
 @dataclass
+class FollowPokeTrace:
+    """一次自动跟戳的短期解释记录。"""
+    ts: float
+    group_id: str
+    sender_id: str
+    target_id: str
+    base_prob: float
+    adjusted_prob: float
+    roll: float
+    vibe_reason: str
+
+
+@dataclass
 class PokeLog:
     """戳一戳累积日志（短期 + 长期两个维度）
 
@@ -184,6 +197,9 @@ class LitePokePlugin(Star):
         # 群内滑动窗口（仅 aiocqhttp 群消息场景，用于跟戳决策）
         # { group_id: GroupVibe }
         self._vibe: dict[str, "GroupVibe"] = {}
+
+        # 自动跟戳解释缓存：短期注入给 LLM，消费后清空，避免污染长期上下文。
+        self._follow_traces: deque[FollowPokeTrace] = deque(maxlen=20)
 
         # 戳一戳累积日志（短期 + 长期，跨重启持久化）
         self._poke_log: "PokeLog" = PokeLog()
@@ -1062,11 +1078,12 @@ class LitePokePlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event, request):
-        """在 LLM 请求前注入场景引导 + 可选 PokeLog 统计
+        """在 LLM 请求前注入场景引导、自动跟戳解释和可选 PokeLog 统计。
 
-        两个独立通道：
-        1. PokeLog 统计：默认关闭；开启 poke_log_inject_enabled 后才注入。
-        2. 关键词引导：仅当用户消息命中 trigger_keywords 时执行。
+        三个独立通道：
+        1. 自动跟戳解释：跟戳成功后短期注入一次，说明概率命中的骰点和氛围理由。
+        2. PokeLog 统计：默认关闭；开启 poke_log_inject_enabled 后才注入。
+        3. 关键词引导：仅当用户消息命中 trigger_keywords 时执行。
         """
         msg = event.message_str or ""
         if not msg:
@@ -1080,17 +1097,27 @@ class LitePokePlugin(Star):
         except Exception as e:
             logger.debug(f"[litepoke] LLM 请求前清理 history 失败: {e}")
 
-        # === 通道 1：PokeLog 统计（默认关闭）===
+        def append_system_prompt(block: str) -> None:
+            if not block or not hasattr(request, "system_prompt"):
+                return
+            if request.system_prompt:
+                request.system_prompt = request.system_prompt.rstrip() + "\n\n" + block
+            else:
+                request.system_prompt = block
+
+        scope = str(event.get_group_id() or "_private")
+
+        # === 通道 1：自动跟戳解释（短期缓存，消费后清空）===
+        # 跟戳是概率事件；把命中的随机数和氛围理由交给 LLM，避免事后解释靠猜。
+        if self.cfg.get("follow_trace_inject_enabled", True):
+            append_system_prompt(self._build_follow_trace_block(scope))
+
+        # === 通道 2：PokeLog 统计（默认关闭）===
         # v1.3.4 起戳一戳事件已写入 conversation；PokeLog 仅保留统计能力，默认不再注入 prompt。
         if self.cfg.get("poke_log_inject_enabled", False):
-            poke_log_block = self._build_poke_log_block()
-            if poke_log_block:
-                if hasattr(request, "system_prompt") and request.system_prompt:
-                    request.system_prompt = request.system_prompt.rstrip() + "\n\n" + poke_log_block
-                elif hasattr(request, "system_prompt"):
-                    request.system_prompt = poke_log_block
+            append_system_prompt(self._build_poke_log_block())
 
-        # === 通道 2：关键词引导 ===
+        # === 通道 3：关键词引导 ===
         keywords = self.cfg.get("trigger_keywords", []) or []
         if not keywords:
             return
@@ -1098,7 +1125,7 @@ class LitePokePlugin(Star):
         if not any(w in msg for w in keywords):
             return
 
-        scope = event.get_group_id() or "_private"
+        # scope 已在前面归一化为 str，供跟戳解释和引导 CD 共用。
         guide_cd = self._cfg_float("guide_cd", 30, min_value=0)
         if time.time() - self._guide_last[scope] < guide_cd:
             return
@@ -1109,10 +1136,7 @@ class LitePokePlugin(Star):
             "[轻量戳一戳提示] 如果当前对话氛围适合轻微互动，可以考虑调用 poke_user 工具；不要因为看到提示就强行调用。",
         )
 
-        if hasattr(request, "system_prompt") and request.system_prompt:
-            request.system_prompt = request.system_prompt.rstrip() + "\n\n" + guide_prompt
-        elif hasattr(request, "system_prompt"):
-            request.system_prompt = guide_prompt
+        append_system_prompt(guide_prompt)
 
     def _build_poke_log_block(self) -> str:
         """构造 PokeLog 统计块（注入到 system_prompt）
@@ -1158,6 +1182,43 @@ class LitePokePlugin(Star):
         return (
             f"[戳一戳统计] {recent_text}{today_text}。"
             f"如果觉得对方过界了，可以考虑用 poke_user 工具戳回去或发个文字吐槽。"
+        )
+
+    def _build_follow_trace_block(self, scope: str) -> str:
+        """构造自动跟戳解释块，供下一次 LLM 请求理解刚才为什么跟戳。"""
+        now = time.time()
+        window = self._cfg_int("follow_trace_ttl", 60, min_value=1)
+        kept: deque[FollowPokeTrace] = deque(maxlen=20)
+        matched: list[FollowPokeTrace] = []
+
+        while self._follow_traces:
+            trace = self._follow_traces.popleft()
+            if now - trace.ts > window:
+                continue
+            if trace.group_id == scope:
+                matched.append(trace)
+            else:
+                kept.append(trace)
+
+        self._follow_traces = kept
+        if not matched:
+            return ""
+
+        lines = []
+        for trace in matched[-3:]:
+            lines.append(
+                "- 自动跟戳了用户 "
+                f"{trace.target_id}；触发者={trace.sender_id}；"
+                f"基础概率={trace.base_prob:.3f}，"
+                f"群氛围调整后概率={trace.adjusted_prob:.3f}，"
+                f"随机数={trace.roll:.4f}，因为随机数小于调整后概率所以命中；"
+                f"氛围判断={trace.vibe_reason}。"
+            )
+
+        return (
+            "[自动跟戳解释] 刚才的跟戳是 litepoke 的概率事件，不是你主动决定的。"
+            "如果有人问为什么戳人，请根据下面记录简短说明，不要编造额外原因：\n"
+            + "\n".join(lines)
         )
 
     # ===================== 辅助：群内消息监听（维护滑动窗口） =====================
@@ -1464,9 +1525,33 @@ class LitePokePlugin(Star):
                 vibe = GroupVibe()
                 self._vibe[gid] = vibe
             window = self._cfg_int("vibe_window", 60, min_value=1)
-            vibe.recent_pokes.append(time.time())
+            now = time.time()
+            vibe.recent_pokes.append(now)
             vibe.last_poke_target = str(target_id)
-            vibe.prune(time.time(), window)
+            vibe.prune(now, window)
+            self._follow_traces.append(
+                FollowPokeTrace(
+                    ts=now,
+                    group_id=gid,
+                    sender_id=str(user_id),
+                    target_id=str(target_id),
+                    base_prob=prob,
+                    adjusted_prob=adjusted_prob,
+                    roll=roll,
+                    vibe_reason=reason,
+                )
+            )
+            self._diagnose(
+                "follow_poke",
+                "hit",
+                group=gid,
+                sender=user_id,
+                target=target_id,
+                roll=round(roll, 4),
+                base_prob=prob,
+                adjusted_prob=round(adjusted_prob, 4),
+                vibe_reason=reason,
+            )
             logger.debug(f"[litepoke] 跟戳 group={gid} target={target_id} reason={reason}")
         except Exception as e:
             logger.warning(f"[litepoke] 跟戳失败: {e}")

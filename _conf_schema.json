@@ -125,6 +125,18 @@
         "type": "float",
         "default": 3
     },
+    "follow_trace_inject_enabled": {
+        "description": "【群内跟戳】注入跟戳解释",
+        "hint": "开启后，自动跟戳成功会短期注入一条解释给下一次 LLM 请求，说明基础概率、群氛围调整、随机数命中原因；用于回答'为什么戳他'，默认开启",
+        "type": "bool",
+        "default": true
+    },
+    "follow_trace_ttl": {
+        "description": "【群内跟戳】跟戳解释保留秒数",
+        "hint": "自动跟戳解释缓存保留多久，过期未被 LLM 消费会丢弃；只保存在内存，不写入 PokeLog",
+        "type": "int",
+        "default": 60
+    },
     "vibe_window": {
         "description": "【群氛围决策】群内滑动窗口秒数",
         "hint": "用于跟戳决策的滑动窗口长度。窗口外的事件会被清理",
