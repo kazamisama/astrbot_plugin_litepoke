@@ -2,6 +2,13 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.6] - 2026-06-13
+
+### Fixed
+- 修复 v1.1.0 tag 指向的 commit `05df7aa` 中 `metadata.yaml` version 字段历史停留在 `v1.0.0` 的瑕疵。该 commit 在 push 时未同步 bump metadata.yaml（CHANGELOG 与 commit message 已声明为 v1.1.0），导致 checkout 到 `v1.1.0` tag 时 AstrBot WebUI 会显示 `v1.0.0`。本次补一份说明，建议部署或回滚到 v1.1.0 时以本 CHANGELOG 为准，不要单看 metadata.yaml。
+- `metadata.yaml` version：v1.4.5 → v1.4.6
+
+---
 ## [v1.4.5] - 2026-06-12
 
 ### Added
