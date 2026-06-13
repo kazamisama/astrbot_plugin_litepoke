@@ -2,6 +2,22 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.7] - 2026-06-13
+
+### Changed
+- chat_plus 插件已停用，清理文档/配置/注释中“接管 chat_plus”措辞，避免新用户误以为必须先装 chat_plus 才能用 litepoke 的被戳回应功能。
+  - README 第 6 章重写：标题改为「bot 被戳主动回应（v1.3+）」，开头段去掉 chat_plus 兼容性说明，改为“≤ v1.2 静默累积 / v1.3+ 主动回应”的版本演进描述；流程图标题「接管流程」改为「触发流程」。
+  - README 第 7 章把「接管响应（v1.3+）」改为「主动回应（v1.3+）」。
+  - `_conf_schema.json` 中 `respond_poked_enabled` 的 description 改为「主动回应被戳（v1.3+）」，hint 改为描述 `respond_poked_mode` 两种取值。
+  - `main.py` 戳一戳事件文本构造模块的注释补充「chat_plus 插件本身已停用，本方法作为历史溯源保留」。
+  - `main.py` 被戳响应流程的 section 注释、日志消息（`[litepoke] 接管戳一戳：...`、`[litepoke] 接管戳一戳 LLM 响应失败: ...`）改为「主动回应被戳」中性措辞。
+- README 配置项表格里 `respond_poked_enabled` 的中文说明、v1.3 调优提示里的「完全关掉接管」也同步改为「主动回应被戳」。
+
+### Note
+- 本次为纯文档/注释/配置措辞清理，不影响任何运行时行为。
+- CHANGELOG 中 v1.3.0 ~ v1.3.4 的 chat_plus 相关条目**保持原样**，因为那些段落记录的是当时的设计决策，改写反而失真。
+
+---
 ## [v1.4.6] - 2026-06-13
 
 ### Fixed

@@ -264,14 +264,15 @@ class LitePokePlugin(Star):
         suffix = f" {details}" if details else ""
         logger.info(f"[litepoke][diag] action={action} reason={reason}{suffix}")
 
-    # ===================== 内部：戳一戳事件文本构造（移植 chat_plus） =====================
+    # ===================== 内部：戳一戳事件文本构造（移植自 chat_plus；chat_plus 已停用） =====================
 
     @staticmethod
     def _build_poke_event_text(poke_info: dict | None) -> str:
         """构造可注入到 LLM 的戳一戳事件伪消息文本
 
-        移植自 astrbot_plugin_group_chat_plus 的 build_persistent_poke_event_text。
-        不依赖 chat_plus，独立运行。
+        移植自 astrbot_plugin_group_chat_plus 的 build_persistent_poke_event_text
+        （chat_plus 插件本身已停用，本方法作为历史溯源保留）。
+        litepoke 自 v1.3 起独立运行，不依赖任何外部插件。
         """
         if not poke_info or not isinstance(poke_info, dict):
             return ""
@@ -1357,7 +1358,7 @@ class LitePokePlugin(Star):
                 )
             )
 
-            # 接管：主动触发 LLM 回应（v1.3.0+）
+            # 主动回应：主动触发 LLM 回应（v1.3.0+）
             if not self.cfg.get("respond_poked_enabled", True):
                 self._diagnose(
                     "respond_poked",
@@ -1415,7 +1416,7 @@ class LitePokePlugin(Star):
                 result = await self._send_fallback(event)
                 event.stop_event()
                 logger.info(
-                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
+                    f"[litepoke] 主动回应被戳：scope={group_id or '_private'} sender={user_id} "
                     f"-> 直发回退响应: {result}"
                 )
                 return
@@ -1431,12 +1432,12 @@ class LitePokePlugin(Star):
                 conversation = await self._get_conversation(event)
 
                 logger.info(
-                    f"[litepoke] 接管戳一戳：scope={group_id or '_private'} sender={user_id} "
+                    f"[litepoke] 主动回应被戳：scope={group_id or '_private'} sender={user_id} "
                     "-> 直接请求 LLM 响应"
                 )
                 yield event.request_llm(prompt=llm_prompt, conversation=conversation)
             except Exception as e:
-                logger.warning(f"[litepoke] 接管戳一戳 LLM 响应失败: {e}")
+                logger.warning(f"[litepoke] 主动回应被戳 LLM 响应失败: {e}")
                 try:
                     result = await self._send_fallback(event)
                     event.stop_event()

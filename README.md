@@ -110,7 +110,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
-| `respond_poked_enabled` | true | 接管戳一戳响应开关 |
+| `respond_poked_enabled` | true | 主动回应被戳开关 |
 | `respond_poked_mode` | `direct` | `direct`=直接表情/文字回退，最稳定；`llm`/`replay`=走 AstrBot 原生 LLM 请求链 |
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
@@ -248,17 +248,11 @@ data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 
 **消费机制**：只有开启 `poke_log_inject_enabled` 并实际注入时，`recent` 才会被消费清空；`daily` 不清空，跨重启保留 7 天。
 
-### 6. 接管 chat_plus 的戳一戳响应（v1.3+）
+### 6. bot 被戳主动回应（v1.3+）
 
-litepoke 现在可以**完全独立地**处理 bot 被戳的事件，**不依赖** chat_plus 的 `bot_only` 模式。
+litepoke 自 v1.3 起在 bot 被戳时会**主动**走完整响应链：累积 PokeLog → 调 LLM（或回退）→ 发出可见消息。早期版本（≤ v1.2）只静默累积 PokeLog，**不会**主动回应被戳；从 v1.3 起默认会主动回应，让被戳变得“有触感”。
 
-**为什么需要这个**：
-
-- chat_plus 设为 `ignore` 模式时，戳一戳事件被作为空 Poke 组件加进 conversation，LLM 困惑
-- chat_plus 设为 `bot_only` 模式时，chat_plus 自己构造伪消息（litepoke 不需要这个）
-- **v1.3+ litepoke 自己接管**——bot 被戳时主动调 `event.request_llm()` 触发 LLM 回应
-
-**接管流程**：
+**触发流程**：
 
 ```text
 A 戳了 bot
@@ -292,7 +286,7 @@ LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应
 - `respond_poked_prob = 1.0`（默认）— 100% 响应
 - `respond_poked_prob = 0.5` — 一半的戳一戳会响应
 - `respond_poked_cd = 10`（默认 10s）— 群友狂戳 bot 时 10 秒只回 1 次
-- `respond_poked_enabled = false` — 完全关掉接管，回到 v1.2.0 行为（只累积 PokeLog）
+- `respond_poked_enabled = false` — 完全关掉被戳主动回应，回到 v1.2.0 行为（只累积 PokeLog）
 
 ### 7. 戳一戳事件和 LLM 上下文
 
@@ -300,7 +294,7 @@ LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应
 - `poke_user` tool 是 LLM 在**用户发消息**时自主决定调用的工具
 - 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
 - PokeLog（v1.2+）通过 `on_llm_request` 钩子**延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
-- **接管响应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
+- **主动回应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
 - **写入上下文**（v1.3.4+）：开启 `respond_poked_write_context` 后，bot 被戳的 notice 会作为一条纯文本 `user` 消息写入官方 conversation，后续普通对话也能自然感知这次戳一戳事件
 - 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。主动回应时会优先传入官方 conversation；由于当前戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则降级为只传 `poke_event` prompt + 当前 persona `system_prompt`
 

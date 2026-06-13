@@ -72,8 +72,8 @@
         "default": "（戳了你一下）"
     },
     "respond_poked_enabled": {
-        "description": "【bot 被戳回应】接管戳一戳响应（v1.3+）",
-        "hint": "开启后，bot 被戳时会主动响应，不依赖 chat_plus 的 bot_only 模式",
+        "description": "【bot 被戳回应】主动回应被戳（v1.3+）",
+        "hint": "开启后，bot 被戳时会按 respond_poked_mode 主动响应：direct=表情/文字回退保证可见，llm/replay=让模型按人设回应",
         "type": "bool",
         "default": true
     },
