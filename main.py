@@ -181,10 +181,10 @@ class LitePokePlugin(Star):
         super().__init__(context)
         self.cfg = config
 
-        # 分开记录不同主动动作的时间，避免工具戳、跟戳、被戳回应互相误伤 CD
+        # 分开记录不同主动动作的时间，避免工具戳、跟戳、被戳回应互相误伤 CD；跟戳/被戳回应按群隔离
         self._last_tool_poke: float = 0.0
-        self._last_follow_poke: float = 0.0
-        self._last_respond_poked: float = 0.0
+        self._last_follow_poke: dict[str, float] = {}
+        self._last_respond_poked: dict[str, float] = {}
 
         # 引导CD：{ scope: last_guide_time }
         self._guide_last: dict[str, float] = defaultdict(float)
@@ -933,13 +933,13 @@ class LitePokePlugin(Star):
 
     # ===================== 内部：发送回退 =====================
 
-    async def _send_fallback(self, event: Any) -> str:
+    async def _send_fallback(self, event: Any, emotion: str | None = None) -> str:
         """在非 aiocqhttp 平台发送回退表达（meme / face / text）
 
         返回给人看的成功描述（喂给 LLM 当 tool result）
         """
         # 尝试 1：meme
-        meme_path = self._pick_meme(None)
+        meme_path = self._pick_meme(emotion)
         if meme_path is not None:
             try:
                 chain = MessageChain([Image.fromFileSystem(str(meme_path))])
@@ -999,7 +999,7 @@ class LitePokePlugin(Star):
 
         # 平台 & 作用域
         is_aiocqhttp = isinstance(event, AiocqhttpMessageEvent)
-        group_id = event.get_group_id() if is_aiocqhttp else ""
+        group_id = event.get_group_id() or ""
         scope = group_id or "_private"
 
         # 私聊开关
@@ -1073,7 +1073,7 @@ class LitePokePlugin(Star):
 
         # === 分支 B：非 aiocqhttp 平台用表情包回退 ===
         self._record_poke(scope, user_id)
-        return await self._send_fallback(event)
+        return await self._send_fallback(event, emotion=emotion)
 
     # ===================== 辅助：场景引导 =====================
 
@@ -1370,7 +1370,7 @@ class LitePokePlugin(Star):
 
             # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
             respond_cd = self._cfg_float("respond_poked_cd", 10, min_value=0)
-            elapsed = time.time() - self._last_respond_poked
+            elapsed = time.time() - self._last_respond_poked.get(group_id or "_private", 0.0)
             if elapsed < respond_cd:
                 self._diagnose(
                     "respond_poked",
@@ -1410,7 +1410,7 @@ class LitePokePlugin(Star):
             respond_mode = str(
                 self.cfg.get("respond_poked_mode", "direct") or "direct"
             ).strip().lower()
-            self._last_respond_poked = time.time()
+            self._last_respond_poked[group_id or "_private"] = time.time()
 
             if respond_mode not in {"replay", "llm"}:
                 result = await self._send_fallback(event)
@@ -1428,8 +1428,14 @@ class LitePokePlugin(Star):
                     "respond_poked_prompt",
                     "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
                 )
-                llm_prompt = prompt_template.format(poke_event=poke_text)
                 conversation = await self._get_conversation(event)
+                # 事件已写入 conversation 时，prompt 只引用上文，避免同一 poke_text
+                # 同时出现在历史和新 user 消息里，让模型误判被戳两次。
+                if wrote_context and conversation is not None:
+                    poke_event_ref = "[请参考上文最新的戳一戳事件]"
+                else:
+                    poke_event_ref = poke_text
+                llm_prompt = prompt_template.format(poke_event=poke_event_ref)
 
                 logger.info(
                     f"[litepoke] 主动回应被戳：scope={group_id or '_private'} sender={user_id} "
@@ -1483,7 +1489,7 @@ class LitePokePlugin(Star):
 
         # CD 兜底：避免群内连续戳一戳事件时连续跟戳
         follow_cd = self._cfg_float("follow_cd", 3, min_value=0)
-        elapsed = time.time() - self._last_follow_poke
+        elapsed = time.time() - self._last_follow_poke.get(gid, 0.0)
         if elapsed < follow_cd:
             self._diagnose(
                 "follow_poke",
@@ -1519,7 +1525,7 @@ class LitePokePlugin(Star):
                 group_id=int(group_id),
                 user_id=int(target_id),
             )
-            self._last_follow_poke = time.time()
+            self._last_follow_poke[gid] = time.time()
             # 记录到 vibe
             vibe = self._vibe.get(gid)
             if vibe is None:
@@ -1614,4 +1620,6 @@ class LitePokePlugin(Star):
         self._guide_last.clear()
         self._meme_index.clear()
         self._vibe.clear()
+        self._last_follow_poke.clear()
+        self._last_respond_poked.clear()
         logger.info("[litepoke] 插件已卸载，guide/meme/vibe/PokeLog 状态已清空")

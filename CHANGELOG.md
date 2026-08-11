@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.8] - 2026-08-11
+
+### Fixed
+- 修复非 aiocqhttp 平台（webchat/telegram/飞书等）群聊中调用 `poke_user` 时，`only_group=true` 把群聊误判为私聊并拦截的问题；`group_id` 现在对全平台统一取 `event.get_group_id()`。
+- 修复 LLM 调用 `poke_user` 传入的 `emotion` 未透传到表情回退的问题；`_send_fallback` 现在接收 `emotion` 并传给 `_pick_meme`，非 aiocqhttp 平台会优先按 LLM 指定标签选图。
+- 修复 `respond_poked_mode=llm/replay` 且戳一戳事件已写入 conversation 时，同一 `poke_text` 同时出现在历史和新 user 消息里、可能被模型误判为被戳两次的问题；prompt 改为引用“上文最新的戳一戳事件”。
+- `metadata.yaml` version：v1.4.7 → v1.4.8
+
+### Changed
+- 跟戳 CD 与被戳响应 CD 改为按群（scope）隔离：`_last_follow_poke` / `_last_respond_poked` 从全局时间戳改为按 group/scope 的字典，多个群互不压制。
+
+---
 ## [v1.4.7] - 2026-06-13
 
 ### Changed
