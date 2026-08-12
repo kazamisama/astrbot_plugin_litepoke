@@ -2,6 +2,18 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.9] - 2026-08-13
+
+### Changed
+- `on_llm_request` 注入从拼接 `system_prompt` 改为统一写入 `request.extra_user_content_parts` 并调用 `TextPart.mark_as_temp()`（跟戳解释 / PokeLog 统计 / 关键词引导三条通道一致）：
+  - 块只发给 LLM，不写入 conversation 历史，避免临时状态泄漏到后续轮次。
+  - system_prompt 前缀保持可缓存，降低动态注入对 LLM 前缀缓存命中率的影响。
+  - 旧版 AstrBot（无 `extra_user_content_parts`）自动回退 system_prompt 拼接，行为不变。
+- `metadata.yaml` version：v1.4.8 → v1.4.9
+
+### Docs
+- README / `_conf_schema.json` 中“注入到 system_prompt”的措辞同步改为临时 TextPart 注入。
+
 ## [v1.4.8] - 2026-08-11
 
 ### Fixed

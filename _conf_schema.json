@@ -37,7 +37,7 @@
     },
     "guide_prompt": {
         "description": "【普通消息引导】普通消息引导提示词",
-        "hint": "用户普通消息命中关键词时附加到 system_prompt 的引导文本；仅用于提醒 LLM 可考虑 poke_user，不处理 bot 被戳事件",
+        "hint": "用户普通消息命中关键词时以临时 TextPart 附加的引导文本（只发给 LLM，不写入历史）；仅用于提醒 LLM 可考虑 poke_user，不处理 bot 被戳事件",
         "type": "text",
         "default": "[轻量戳一戳提示] 如果当前对话氛围适合轻微互动，可以考虑调用 poke_user 工具；不要因为看到提示就强行调用。"
     },
@@ -193,7 +193,7 @@
     },
     "poke_log_inject_enabled": {
         "description": "【PokeLog 统计】注入 PokeLog 统计到提示词",
-        "hint": "开启后会把近期/当天戳一戳统计追加到 system_prompt。默认关闭；v1.3.4+ 已将 bot 被戳事件写入 conversation，通常不需要再注入统计块",
+        "hint": "开启后会把近期/当天戳一戳统计以临时 TextPart 追加到用户消息（只发给 LLM，不写入历史）。默认关闭；v1.3.4+ 已将 bot 被戳事件写入 conversation，通常不需要再注入统计块",
         "type": "bool",
         "default": false
     },

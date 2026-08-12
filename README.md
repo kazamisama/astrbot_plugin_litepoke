@@ -5,7 +5,7 @@
 - **aiocqhttp（QQ）平台**：发送真实的戳一戳通知
 - **其他平台**（webchat / telegram / 飞书 / 企业微信等）：用表情包 / QQ face / 文字模拟"戳"这个动作
 - **LLM 自主判断**：注册 `poke_user` 工具，模型自行决定何时戳
-- **场景引导钩子**：检测关键词 → 往 system_prompt 注入提示 → 让 LLM 考虑调用
+- **场景引导钩子**：检测关键词 → 以临时 TextPart 注入提示 → 让 LLM 考虑调用
 - **群内跟戳**（v1.1+）：监听群内戳一戳事件，按概率跟戳"别人戳别人"，基于滑动窗口的轻量群氛围决策
 - **被戳回应**（v1.4+）：bot 被戳时把 poke notice 伪造成普通文字消息重投递，群聊/私聊统一走 AstrBot 标准消息链路
 
@@ -94,7 +94,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 |---|---|---|
 | `trigger_keywords` | `["笨蛋","人机","机器人","bot","傻"]` | 命中即注入引导提示的关键词 |
 | `guide_cd` | 30 | 同一会话内引导提示最小间隔（秒） |
-| `guide_prompt` | 见配置 | 普通消息命中关键词时注入到 system_prompt 的轻量引导；不处理 bot 被戳事件 |
+| `guide_prompt` | 见配置 | 普通消息命中关键词时以临时 TextPart 注入的轻量引导；不处理 bot 被戳事件 |
 
 ### 表情回退
 
@@ -145,7 +145,7 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `poke_log_window` | 60 | 短期窗口秒数（recent 队列） |
 | `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
 | `poke_log_save_interval` | 60 | 写盘间隔秒数 |
-| `poke_log_inject_enabled` | false | 是否把 PokeLog 统计注入 system_prompt，默认关闭 |
+| `poke_log_inject_enabled` | false | 是否把 PokeLog 统计以临时 TextPart 注入，默认关闭 |
 
 ### 诊断
 
@@ -211,7 +211,7 @@ poke_user(user_id, times=1, emotion=None)
 - 想要"基本不跟戳"：`follow_prob = 0.02`
 - 完全关掉跟戳：`follow_enabled = false`
 
-**跟戳解释**：自动跟戳成功后，插件会把一次短期解释记录放进内存缓存，并在下一次同群 LLM 请求前注入 system prompt。记录包含基础概率、群氛围调整后概率、随机数 roll 和 `vibe_reason`，所以 bot 可以回答“刚才为什么戳他”，而不是凭空编理由。注入后即消费，超过 `follow_trace_ttl` 未消费会丢弃；如果不想让模型感知自动跟戳，关闭 `follow_trace_inject_enabled`。
+**跟戳解释**：自动跟戳成功后，插件会把一次短期解释记录放进内存缓存，并在下一次同群 LLM 请求前以临时 TextPart 注入。记录包含基础概率、群氛围调整后概率、随机数 roll 和 `vibe_reason`，所以 bot 可以回答“刚才为什么戳他”，而不是凭空编理由。注入后即消费，超过 `follow_trace_ttl` 未消费会丢弃；如果不想让模型感知自动跟戳，关闭 `follow_trace_inject_enabled`。
 
 **调试方法**：排查“为什么没跟戳/没回应”时，先在插件配置里临时打开 `debug_diagnostics`，AstrBot 日志里搜 `[litepoke][diag]`。常见 `reason` 包括 `hit`、`cooldown`、`prob_miss`、`disabled`、`private_disabled`、`path_unavailable`。正常运行时建议关掉，避免日志太碎。
 
@@ -235,7 +235,7 @@ data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 **默认行为**：
 
 - `poke_log_persist=true`：继续写盘保留统计
-- `poke_log_inject_enabled=false`：默认不把统计块注入 `system_prompt`
+- `poke_log_inject_enabled=false`：默认不注入统计块
 - 如确实想恢复旧版“刚被戳 N 次 / 今天总共 M 次”的提示词注入，可手动开启 `poke_log_inject_enabled`
 
 **可选注入示例**：
@@ -293,7 +293,8 @@ LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应
 - 戳一戳是 OneBot 的 `notice/poke` 事件，平台本身**默认不进** LLM 对话上下文
 - `poke_user` tool 是 LLM 在**用户发消息**时自主决定调用的工具
 - 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
-- PokeLog（v1.2+）通过 `on_llm_request` 钩子**延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
+- PokeLog（v1.2+）通过 `on_llm_request` 钩子以临时 TextPart **延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
+- 提示词注入（v1.4.9+）统一走 `extra_user_content_parts` + `mark_as_temp()`：跟戳解释 / PokeLog / 关键词引导只发给 LLM，不写入会话历史，也不污染 system_prompt 前缀缓存
 - **主动回应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
 - **写入上下文**（v1.3.4+）：开启 `respond_poked_write_context` 后，bot 被戳的 notice 会作为一条纯文本 `user` 消息写入官方 conversation，后续普通对话也能自然感知这次戳一戳事件
 - 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。主动回应时会优先传入官方 conversation；由于当前戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则降级为只传 `poke_event` prompt + 当前 persona `system_prompt`

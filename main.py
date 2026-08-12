@@ -27,6 +27,7 @@ from astrbot.api import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.agent.message import TextPart
 from astrbot.core.message.components import Face, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -1081,10 +1082,9 @@ class LitePokePlugin(Star):
     async def on_llm_request(self, event, request):
         """在 LLM 请求前注入场景引导、自动跟戳解释和可选 PokeLog 统计。
 
-        三个独立通道：
-        1. 自动跟戳解释：跟戳成功后短期注入一次，说明概率命中的骰点和氛围理由。
-        2. PokeLog 统计：默认关闭；开启 poke_log_inject_enabled 后才注入。
-        3. 关键词引导：仅当用户消息命中 trigger_keywords 时执行。
+        三个独立通道统一写入 ``request.extra_user_content_parts`` 并调用
+        ``mark_as_temp()``，块只发给 LLM、不写入会话历史，system_prompt
+        前缀保持可缓存；旧版 AstrBot 自动回退 system_prompt 拼接。
         """
         msg = event.message_str or ""
         if not msg:
@@ -1098,25 +1098,32 @@ class LitePokePlugin(Star):
         except Exception as e:
             logger.debug(f"[litepoke] LLM 请求前清理 history 失败: {e}")
 
-        def append_system_prompt(block: str) -> None:
-            if not block or not hasattr(request, "system_prompt"):
+        def append_extra_part(block: str) -> None:
+            if not block:
                 return
-            if request.system_prompt:
-                request.system_prompt = request.system_prompt.rstrip() + "\n\n" + block
-            else:
-                request.system_prompt = block
+            if hasattr(request, "extra_user_content_parts"):
+                # mark_as_temp(): 只发给 LLM，不写入 conversation 历史。
+                request.extra_user_content_parts.append(
+                    TextPart(text=block, type="text").mark_as_temp()
+                )
+            elif hasattr(request, "system_prompt"):
+                # 旧版 AstrBot 兜底：退回 system_prompt 拼接。
+                if request.system_prompt:
+                    request.system_prompt = request.system_prompt.rstrip() + "\n\n" + block
+                else:
+                    request.system_prompt = block
 
         scope = str(event.get_group_id() or "_private")
 
         # === 通道 1：自动跟戳解释（短期缓存，消费后清空）===
         # 跟戳是概率事件；把命中的随机数和氛围理由交给 LLM，避免事后解释靠猜。
         if self.cfg.get("follow_trace_inject_enabled", True):
-            append_system_prompt(self._build_follow_trace_block(scope))
+            append_extra_part(self._build_follow_trace_block(scope))
 
         # === 通道 2：PokeLog 统计（默认关闭）===
         # v1.3.4 起戳一戳事件已写入 conversation；PokeLog 仅保留统计能力，默认不再注入 prompt。
         if self.cfg.get("poke_log_inject_enabled", False):
-            append_system_prompt(self._build_poke_log_block())
+            append_extra_part(self._build_poke_log_block())
 
         # === 通道 3：关键词引导 ===
         keywords = self.cfg.get("trigger_keywords", []) or []
@@ -1137,10 +1144,10 @@ class LitePokePlugin(Star):
             "[轻量戳一戳提示] 如果当前对话氛围适合轻微互动，可以考虑调用 poke_user 工具；不要因为看到提示就强行调用。",
         )
 
-        append_system_prompt(guide_prompt)
+        append_extra_part(guide_prompt)
 
     def _build_poke_log_block(self) -> str:
-        """构造 PokeLog 统计块（注入到 system_prompt）
+        """构造 PokeLog 统计块（作为临时 TextPart 注入到用户消息）
 
         只在 PokeLog 有累积时返回非空字符串。
         消费后清空 recent（避免重复注入）。
