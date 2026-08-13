@@ -2,7 +2,20 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.10] - 2026-08-13
+
+### Changed
+- 删除未使用的 `_replay_poke_as_message` 和 `import copy`，将 `respond_poked_mode=replay` 明确为 `llm` 兼容别名。
+- `TextPart` 改为带 `ImportError` 兜底的兼容导入，旧版 AstrBot 自动回退 `system_prompt` 注入。
+- `_drop_recent_raw_poke_from_conversation` 增加通用异常兜底。
+- 移除无读取者的 `_last_tool_poke` 和 `_record_poke`。
+- 新增按群状态周期清理 `_maybe_prune_group_state()`，降低多群长期运行内存增长。
+
+### Fixed
+- 修正 `respond_poked_mode=replay` 配置说明与实现不一致的问题。
+
 ## [v1.4.9] - 2026-08-13
+
 
 ### Changed
 - `on_llm_request` 注入从拼接 `system_prompt` 改为统一写入 `request.extra_user_content_parts` 并调用 `TextPart.mark_as_temp()`（跟戳解释 / PokeLog 统计 / 关键词引导三条通道一致）：

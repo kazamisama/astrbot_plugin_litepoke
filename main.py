@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import random
 import time
@@ -27,7 +26,10 @@ from astrbot.api import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.agent.message import TextPart
+try:
+    from astrbot.core.agent.message import TextPart
+except ImportError:  # 兼容无 TextPart 的旧版 AstrBot
+    TextPart = None
 from astrbot.core.message.components import Face, Image, Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -182,13 +184,13 @@ class LitePokePlugin(Star):
         super().__init__(context)
         self.cfg = config
 
-        # 分开记录不同主动动作的时间，避免工具戳、跟戳、被戳回应互相误伤 CD；跟戳/被戳回应按群隔离
-        self._last_tool_poke: float = 0.0
+        # 跟戳/被戳响应按群隔离，互不共享 CD；工具戳本身不做 CD。
         self._last_follow_poke: dict[str, float] = {}
         self._last_respond_poked: dict[str, float] = {}
 
         # 引导CD：{ scope: last_guide_time }
         self._guide_last: dict[str, float] = defaultdict(float)
+        self._last_group_state_cleanup: float = 0.0
 
         # meme 路径缓存
         self._meme_dir: Path | None = None
@@ -443,45 +445,6 @@ class LitePokePlugin(Star):
         logger.warning(f"[litepoke] 已清理非法 LLM history {removed} 条 id={cid}{suffix}")
         return True
 
-    async def _replay_poke_as_message(
-        self,
-        event: AiocqhttpMessageEvent,
-        poke_text: str,
-    ) -> bool:
-        """把 poke notice 伪造成一条普通文字消息，重新投递到 AstrBot 事件队列。
-
-        借鉴 pokepro 的 COMMAND 模块：copy event → 改 message/message_str
-        → should_call_llm(True) → set_extra 防递归 → put_nowait。
-        不插入真实 At 组件，只强制唤醒，让它像“被戳了一下”这类普通文字输入。
-        """
-        if not poke_text:
-            return False
-
-        try:
-            evt = copy.copy(event)
-            evt.message_obj = copy.copy(event.message_obj)
-            try:
-                evt._extras = dict(event.get_extra())
-            except Exception:
-                pass
-
-            evt.clear_result()
-            event.stop_event()
-
-            chain = [Plain(poke_text)]
-            evt.message_obj.message = chain
-            evt.message_obj.message_str = poke_text
-            evt.message_str = poke_text
-            evt.is_at_or_wake_command = True
-            evt.should_call_llm(True)
-            evt.set_extra("litepoke_replayed_poke", True)
-
-            self.context.get_event_queue().put_nowait(evt)
-            return True
-        except Exception as e:
-            logger.warning(f"[litepoke] poke 伪消息重投递失败: {e}")
-            return False
-
     async def _append_poke_event_to_conversation(
         self,
         event: AiocqhttpMessageEvent,
@@ -616,7 +579,9 @@ class LitePokePlugin(Star):
             await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
         except TypeError:
             await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
-
+        except Exception as e:
+            logger.warning(f"[litepoke] 删除原始 outgoing 戳一戳 history 失败: {e}")
+            return False
         suffix = f" reason={reason}" if reason else ""
         logger.debug(f"[litepoke] 已删除原始 outgoing 戳一戳 history id={cid}{suffix}")
         return True
@@ -723,8 +688,33 @@ class LitePokePlugin(Star):
 
     # ===================== 内部：状态记录 =====================
 
-    def _record_poke(self, scope: str, user_id: str) -> None:
-        self._last_tool_poke = time.time()
+    def _maybe_prune_group_state(self) -> None:
+        """按周期清理长期未活动的群级状态，避免多群运行内存持续增长。"""
+        now = time.time()
+        if now - self._last_group_state_cleanup < 300:
+            return
+        self._last_group_state_cleanup = now
+
+        vibe_window = self._cfg_int("vibe_window", 60, min_value=1)
+        for gid in list(self._vibe.keys()):
+            vibe = self._vibe.get(gid)
+            if vibe is None:
+                continue
+            vibe.prune(now, vibe_window)
+            if not vibe.recent_msgs and not vibe.recent_pokes:
+                self._vibe.pop(gid, None)
+
+        ttl = max(
+            300,
+            self._cfg_float("follow_cd", 3, min_value=0),
+            self._cfg_float("respond_poked_cd", 10, min_value=0),
+            self._cfg_float("guide_cd", 30, min_value=0),
+        )
+        for mapping in (self._last_follow_poke, self._last_respond_poked):
+            for gid in [gid for gid, ts in mapping.items() if now - ts > ttl]:
+                mapping.pop(gid, None)
+        for scope in [scope for scope, ts in self._guide_last.items() if now - ts > ttl]:
+            self._guide_last.pop(scope, None)
 
     # ===================== 内部：PokeLog 持久化 =====================
 
@@ -1048,7 +1038,6 @@ class LitePokePlugin(Star):
                 if i < times - 1:
                     await asyncio.sleep(interval)
 
-            self._record_poke(scope, user_id)
             if success_count == times:
                 return f"已成功戳用户 {user_id} {success_count} 次"
             return f"戳一戳部分失败：成功 {success_count}/{times} 次，错误：{last_err}"
@@ -1059,7 +1048,6 @@ class LitePokePlugin(Star):
                 # NapCat / OneBot 新实现更稳定支持 send_poke；
                 # 旧 friend_poke 封装在部分适配组合里可能存在但无实际效果。
                 await event.bot.api.call_action("send_poke", user_id=int(user_id))
-                self._record_poke(scope, user_id)
                 return f"已戳好友 {user_id} 1 次"
             except Exception as send_poke_err:
                 logger.warning(
@@ -1067,13 +1055,11 @@ class LitePokePlugin(Star):
                 )
                 try:
                     await event.bot.friend_poke(user_id=int(user_id))
-                    self._record_poke(scope, user_id)
                     return f"已戳好友 {user_id} 1 次"
                 except Exception as friend_poke_err:
                     return f"戳好友失败：send_poke={send_poke_err}; friend_poke={friend_poke_err}"
 
         # === 分支 B：非 aiocqhttp 平台用表情包回退 ===
-        self._record_poke(scope, user_id)
         return await self._send_fallback(event, emotion=emotion)
 
     # ===================== 辅助：场景引导 =====================
@@ -1090,9 +1076,10 @@ class LitePokePlugin(Star):
         if not msg:
             return
 
+        self._maybe_prune_group_state()
+
         if not event.get_group_id() and self.cfg.get("only_group", True):
             return
-
         try:
             await self._sanitize_current_conversation(event, reason="on_llm_request")
         except Exception as e:
@@ -1101,7 +1088,7 @@ class LitePokePlugin(Star):
         def append_extra_part(block: str) -> None:
             if not block:
                 return
-            if hasattr(request, "extra_user_content_parts"):
+            if TextPart is not None and hasattr(request, "extra_user_content_parts"):
                 # mark_as_temp(): 只发给 LLM，不写入 conversation 历史。
                 request.extra_user_content_parts.append(
                     TextPart(text=block, type="text").mark_as_temp()
@@ -1243,6 +1230,8 @@ class LitePokePlugin(Star):
         if not gid:
             return
 
+        self._maybe_prune_group_state()
+
         vibe = self._vibe.get(gid)
         if vibe is None:
             vibe = GroupVibe()
@@ -1269,6 +1258,8 @@ class LitePokePlugin(Star):
             return
         if event.get_extra("litepoke_replayed_poke"):
             return
+
+        self._maybe_prune_group_state()
 
         # 解析戳一戳事件
         raw = getattr(event.message_obj, "raw_message", None)
@@ -1413,7 +1404,7 @@ class LitePokePlugin(Star):
                 return
 
             # 非 CD：默认直接发送回退表达，避免 notice 事件重投递后只走插件监听、没有触发 LLM。
-            # 如需继续尝试“伪消息 → 标准消息 pipeline → LLM”，可把 respond_poked_mode 设为 replay。
+            # 非 direct 模式统一走原生 LLM 请求链；replay 仅作为 llm 的兼容别名。
             respond_mode = str(
                 self.cfg.get("respond_poked_mode", "direct") or "direct"
             ).strip().lower()
@@ -1429,7 +1420,6 @@ class LitePokePlugin(Star):
                 return
 
             # llm/replay 模式：直接走 AstrBot 原生 LLM 请求链。
-            # 旧版 put_nowait 伪消息在部分 pipeline 中只会触发插件监听，不会进入核心 LLM 回复阶段。
             try:
                 prompt_template = self.cfg.get(
                     "respond_poked_prompt",
