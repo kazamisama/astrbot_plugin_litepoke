@@ -2,6 +2,45 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.5.0] - 2026-10-27
+
+一次以“完备性与冗余”为核心的审计重构：修掉数据丢失与生命周期泄漏，删掉死代码与重复样板，补上此前缺失的单元测试，并移除不再需要的跨平台表情回退。
+
+### Fixed
+- **conversation 历史可能被覆盖（数据丢失）**：`_append_poke_event_to_conversation` 在 history JSON 解析失败时会把 history 置为 `[]` 再写回，等于把整段对话替换成一条戳一戳事件。现在四个 history 写入方法共用 `_history_from_conversation`，解析失败返回 `None`，写入方直接放弃写回。
+- `PokeLog.from_dict` 在 `last_saved` 字段损坏时抛 `ValueError`，会让整份 PokeLog 被当作坏文件归档；现在单字段损坏只回退为 0.0。
+- 删除只读不写的 `litepoke_replayed_poke` 兼容检查（写入方已于 v1.4.10 删除）。
+- 删除只写不读的 `GroupVibe.last_poke_target`。
+- `_maybe_periodic_save` 在 `poke_log_persist=false` 时不再被调用。
+- `vibe_max_in_window` 读取时最小夹到 1，避免配置成 0 时跟戳被静默关闭。
+- `terminate` 会取消所有在途的延迟清理任务，并清理 `_follow_traces` / `_last_follow` / `_last_respond_poked` 等运行态。
+- `_build_poke_event_text` 的 5 个不可达分支（被“未知用户”兜底短路）已删除，只保留 bot 被戳与他人互戳两种输出。
+- `_is_raw_poke_history_message` 收紧：只有戳一戳标记文本或完全空内容才算原始 poke，纯图片等无文本消息不再被误判。
+- 跟戳发送失败时补 `_diagnose(reason=send_failed)`，不再只有一行 warning。
+
+### Changed
+- 拆分 `on_group_poke`（原 312 行）：`_parse_poke_notice` 负责事件解析，`_handle_outgoing_poke` / `_handle_bot_poked` / `_handle_follow_poke` 分别处理戳别人、戳 bot、群内跟戳三条路径。
+- 戳一戳通知同时接受 `notice_type=notify + sub_type=poke` 与 `notice_type=poke` 两种形状。
+- `_resolve_poke_log_path` 改用新增的 `_plugin_data_dir()`。
+- `_cfg_int` 复用 `_clamp`，去掉重复实现；删除函数内的局部 `import timedelta / Counter / get_astrbot_plugin_data_path`。
+- `_track_task()` 保留后台任务引用，避免延迟清理任务被 GC；`on_group_poke` 内的 `group_id or "_private"` 收敛为单个 `scope`。
+- `on_llm_request` 的 history 自清理提前到 `message_str` 判空之前：bot 被戳的主动回应是 notice 事件（`message_str=""`），此前会绕过自清理；三个提示词注入通道仍要求有用户文本。
+
+### Removed（breaking）
+- 移除跨平台表情回退：`_send_fallback` / `_refresh_meme_index` / `_pick_meme` / `_resolve_meme_dir` 与 `poke_user` 的 `emotion` 参数。戳一戳只在 aiocqhttp 存在，其他平台调用 `poke_user` 现在直接返回「当前平台不支持戳一戳」，不再发表情包或文字。
+- 删除配置项 `enable_meme_fallback`、`meme_dir`、`default_emotion`、`fallback_face_id`、`fallback_text`（旧配置里残留的键会被忽略）。
+- 删除 `EMOTION_GUIDE.md`。
+- `respond_poked_mode=direct` 不再发表情/face，改为发送新增的 `respond_poked_text`（默认「（戳了你一下）」）；LLM 请求失败时也用同一句兜底。
+
+### Added
+- `tests/test_litepoke.py`：stdlib unittest 用例（用桩替换 astrbot 依赖，无需安装 AstrBot），覆盖 PokeLog 读写/裁剪/坏数据、配置读取、戳一戳文本、原始 poke 判定、history 清洗与解析、vibe 概率规则、通知解析、数据目录推导、直发文字回退、非 aiocqhttp 平台拒绝。运行：`python -m unittest discover -s tests`。
+
+### Docs
+- README 与实现对齐：移除已于 v1.3.16 删除的 persona / `func_tool_manager` / `tool_set` 降级链描述；同步删除表情回退章节、`EMOTION_GUIDE.md` 链接与文件。
+- README 重构：新增「工作原理」总览图；把使用建议（引导 / 平台差异 / 跟戳调优）与行为说明（PokeLog / 被戳回应 / 上下文）拆成两节；补齐 v1.5.0 的 direct 默认行为、AstrBot >= 4.13.0 要求、私聊需 `only_group=false` 等说明。
+- 合并重复的 `## [v1.1.0]` 标题；版本演进图更新到 v1.4.x；「未发布的计划」移除已由 v1.3.13 实现的 mtime 热加载。
+- 脱敏：本历史条目中的 webchat 用户名示例改为占位名；`EMOTION_GUIDE.md` 中的本机绝对路径随该文件删除一并消失。
+
 ## [v1.4.10] - 2026-08-13
 
 ### Changed
@@ -402,8 +441,6 @@ litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://k
 
 ## [v1.1.0] - 2026-06-07
 
-## [v1.1.0] - 2026-06-07
-
 ### Added
 - **群内戳一戳事件监听器 (`on_group_poke`)**：监听 aiocqhttp 群内戳一戳事件（`notice/notify/poke`），按概率跟戳"别人戳别人"
 - **`GroupVibe` 滑动窗口**：轻量版群氛围追踪，仅记录时间戳和最近一次事件的发送者（O(1) deque）
@@ -478,7 +515,7 @@ litepoke 正式可用的第一个版本，包含完整的戳一戳自主决策�
 
 ### Fixed
 - **MessageChain 导入错误**：`MessageChain` 来自 `astrbot.core.message.message_event_result`，不在 `components` 里
-- **user_id 校验过严**：原本固定校验 `isdigit()`，导致 webchat 字符串 ID（"chiriu"）被拒绝
+- **user_id 校验过严**：原本固定校验 `isdigit()`，导致 webchat 的字符串 ID（如 "alice"）被拒绝
   - 改为：仅 aiocqhttp 校验纯数字，其他平台宽松接受
 - **私聊开关在 aiocqhttp 下被错误拦截**：`only_group` 逻辑调整
 
@@ -520,13 +557,15 @@ litepoke 正式可用的第一个版本，包含完整的戳一戳自主决策�
 ## 版本演进图
 
 ```
-v0.1.0 ──→ v0.2.0 ──→ v0.3.0 ──→ v1.0.0
-基础功能    跨平台回退   表情包独立   文档完善
-   │           │           │          │
-  QQ真戳     meme/face   不再依赖   README
-  +CD       三级降级     meme_mgr   EMOTION_GUIDE
-  +引导     修两bug     自带目录     CHANGELOG
+v0.1.0 ──→ v0.2.0 ──→ v0.3.0 ──→ v1.0.0 ──→ v1.1.0 ──→ v1.2.0 ──→ v1.3.0 ──→ v1.4.x ──→ v1.5.0
+基础功能    跨平台回退   表情包独立   文档完善    跟戳+vibe   PokeLog     主动回应    注入与重构   审计重构
+   │           │           │          │           │           │           │           │           │
+  QQ真戳     meme/face   不再依赖   README      群氛围窗口   统计注入    LLM 响应    temp 注入    测试 + 删除回退
+  +CD       三级降级     meme_mgr   EMOTION     概率调整     原子写盘    上下文写入  单元测试      数据丢失修复
+  +引导     修两bug     自带目录   GUIDE       共享CD       7 天保留    replay 别名 数据丢失修复  direct 默认
 ```
+
+> v1.5.0 移除了跨平台表情回退：戳一戳只在 QQ（aiocqhttp）存在，其他平台不再模拟该动作。
 
 ---
 
@@ -536,15 +575,12 @@ v0.1.0 ──→ v0.2.0 ──→ v0.3.0 ──→ v1.0.0
 
 ### 考虑中
 - **被戳反戳**：检测到别人戳 bot 时自动反戳（pokepro 有，litepoke 暂未实现）
-- **表情回执计数**：记录每个标签被选中的次数，便于调优
-- **批量同步脚本**：从 meme_manager 同步标签的独立工具脚本
-- **mtime 热加载**：检测到 meme_dir 新增图片时自动刷新索引（目前只在第一次或目录变化时刷新）
 
 ### 设计原则
 - **保持单文件**：除非必要不拆模块
-- **零硬依赖**：不依赖 meme_manager，不依赖外部插件
+- **零硬依赖**：不依赖外部插件或额外服务
 - **失败优雅**：任何环节失败都要降级，不能让 tool 抛异常
-- **文档同步**：CHANGELOG / README / EMOTION_GUIDE 跟代码同步更新
+- **文档同步**：CHANGELOG / README 跟代码同步更新
 
 ---
 

@@ -1,9 +1,9 @@
 """
-轻量智能戳一戳插件（v2：跨平台）
+轻量智能戳一戳插件（v2）
 
 设计目标：
 1. aiocqhttp 平台：真戳一戳
-2. 其他平台（webchat、telegram、飞书等）：用表情包 / QQ face / 文字模拟"戳"这个动作
+2. 其他平台（webchat、telegram、飞书等）：没有戳一戳动作，poke_user 直接返回不支持
 3. 由 LLM 自主判断何时调用 poke_user tool
 4. 可选的场景引导：在 on_llm_request 时根据关键词检测，注入提示
 
@@ -16,9 +16,9 @@ import asyncio
 import json
 import random
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,18 +27,22 @@ from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 try:
+    from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+except ImportError:  # 兼容没有该工具函数的旧版 AstrBot
+    get_astrbot_plugin_data_path = None
+try:
     from astrbot.core.agent.message import TextPart
 except ImportError:  # 兼容无 TextPart 的旧版 AstrBot
     TextPart = None
-from astrbot.core.message.components import Face, Image, Plain
+from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
 
-# 表情文件后缀
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+# AstrBot 把原始 Poke 组件写进 history 时可能留下的文本标记（统一小写比较）。
+_RAW_POKE_MARKERS = {"[poke:poke]", "[componenttype.poke]", "[poke]"}
 
 # PokeLog 持久化格式版本。旧版本 JSON 没有该字段，加载时会按 v0 兼容。
 POKE_LOG_SCHEMA_VERSION = 1
@@ -54,7 +58,6 @@ class GroupVibe:
     recent_msgs: deque = field(default_factory=deque)    # 群内最近消息时间戳
     recent_pokes: deque = field(default_factory=deque)   # 群内最近戳一戳时间戳
     last_msg_sender: str = ""                            # 最近说话的人
-    last_poke_target: str = ""                           # 最近被戳的人
 
     def prune(self, now: float, window: int) -> None:
         """清理窗口外的过期条目"""
@@ -110,7 +113,6 @@ class PokeLog:
         """删除 keep_days 之外的日期"""
         if keep_days <= 0:
             return
-        from datetime import timedelta
         cutoff_date = (date.today() - timedelta(days=keep_days)).isoformat()
         stale = [d for d in self.daily if d < cutoff_date]
         for d in stale:
@@ -172,10 +174,16 @@ class PokeLog:
                 if day_counts:
                     daily[str(day)] = day_counts
 
+        try:
+            last_saved = float(data.get("last_saved", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            # 单字段损坏不该让整份 PokeLog 报废（调用方会把它当坏文件归档）。
+            last_saved = 0.0
+
         return cls(
             recent=recent_items,
             daily=daily,
-            last_saved=float(data.get("last_saved", 0.0) or 0.0),
+            last_saved=last_saved,
         )
 
 
@@ -192,11 +200,6 @@ class LitePokePlugin(Star):
         self._guide_last: dict[str, float] = defaultdict(float)
         self._last_group_state_cleanup: float = 0.0
 
-        # meme 路径缓存
-        self._meme_dir: Path | None = None
-        self._meme_index: dict[str, list[Path]] = {}  # emotion -> [paths]
-        self._meme_index_mtime: float = 0.0
-
         # 群内滑动窗口（仅 aiocqhttp 群消息场景，用于跟戳决策）
         # { group_id: GroupVibe }
         self._vibe: dict[str, "GroupVibe"] = {}
@@ -207,6 +210,9 @@ class LitePokePlugin(Star):
         # 戳一戳累积日志（短期 + 长期，跨重启持久化）
         self._poke_log: "PokeLog" = PokeLog()
         self._poke_log_path: Path | None = None
+
+        # 后台清理任务引用：不持有引用时 asyncio 可能在完成前回收任务。
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # 启动时从 JSON 恢复 PokeLog
         self._load_poke_log()
@@ -249,11 +255,17 @@ class LitePokePlugin(Star):
         except (TypeError, ValueError):
             logger.warning(f"[litepoke] 配置 {key} 不是有效整数，使用默认值 {default}")
             value = int(default)
-        if min_value is not None:
-            value = max(min_value, value)
-        if max_value is not None:
-            value = min(max_value, value)
-        return value
+        return int(self._clamp(float(value), min_value, max_value))
+
+    def _track_task(self, coro) -> None:
+        """把协程挂成后台任务并持有引用，避免任务未完成就被回收。"""
+        try:
+            task = asyncio.ensure_future(coro)
+        except RuntimeError as e:  # 没有运行中的事件循环（理论不可达）
+            logger.warning(f"[litepoke] 无法创建后台任务: {e}")
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def _diagnose(self, action: str, reason: str, **fields: Any) -> None:
         """按需输出诊断日志，方便排查一次戳一戳为什么被跳过/降级。"""
@@ -276,6 +288,9 @@ class LitePokePlugin(Star):
         移植自 astrbot_plugin_group_chat_plus 的 build_persistent_poke_event_text
         （chat_plus 插件本身已停用，本方法作为历史溯源保留）。
         litepoke 自 v1.3 起独立运行，不依赖任何外部插件。
+
+        注意：sender_name / target_name 都有 "未知用户" 兜底，所以 sender_text /
+        target_text 永远非空，这里只需要区分「戳的是 bot」和「戳的是别人」两种输出。
         """
         if not poke_info or not isinstance(poke_info, dict):
             return ""
@@ -288,22 +303,12 @@ class LitePokePlugin(Star):
         target_name = (
             str(poke_info.get("target_name", "") or "").strip() or "未知用户"
         )
-        is_poke_bot = bool(poke_info.get("is_poke_bot", False))
 
         sender_text = f"{sender_name}(ID:{sender_id})" if sender_id else sender_name
         target_text = f"{target_name}(ID:{target_id})" if target_id else target_name
 
-        if is_poke_bot:
-            if not sender_text:
-                return "[戳一戳事件]有人戳了你"
+        if poke_info.get("is_poke_bot", False):
             return f"[戳一戳事件]有人戳了你，发起者是{sender_text}"
-
-        if not sender_text and not target_text:
-            return "[戳一戳事件]发生了一次戳一戳互动"
-        if not sender_text:
-            return f"[戳一戳事件]这不是戳你的消息，有人戳了{target_text}"
-        if not target_text:
-            return f"[戳一戳事件]这不是戳你的消息，{sender_text}戳了别人"
         return f"[戳一戳事件]这不是戳你的消息，{sender_text}戳了{target_text}"
 
     async def _get_conversation_with_id(self, event: AiocqhttpMessageEvent):
@@ -347,7 +352,11 @@ class LitePokePlugin(Star):
         return ""
 
     def _is_raw_poke_history_message(self, msg: Any) -> bool:
-        """判断 history 中由 AstrBot 原始 Poke 组件产生的空/标记 user 消息。"""
+        """判断 history 中由 AstrBot 原始 Poke 组件产生的空/标记 user 消息。
+
+        只认两类：文本精确等于已知 Poke 标记，或者 content 完全为空。
+        纯图片/语音等「没有文本但有内容」的消息不算，避免误删真实用户消息。
+        """
         if not isinstance(msg, dict):
             return False
         if msg.get("role") != "user":
@@ -357,9 +366,26 @@ class LitePokePlugin(Star):
         if isinstance(metadata, dict) and metadata.get("source") == "litepoke":
             return False
 
-        text = self._extract_text_from_content(msg.get("content"))
-        normalized = text.replace(" ", "").lower()
-        return not text or normalized in {"[poke:poke]", "[componenttype.poke]"}
+        content = msg.get("content")
+        text = self._extract_text_from_content(content)
+        if text.replace(" ", "").lower() in _RAW_POKE_MARKERS:
+            return True
+        if text:
+            return False
+
+        # 没有文本：只有「完全空」的内容才算原始 Poke 占位。
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return not content.strip()
+        if isinstance(content, list):
+            return all(
+                isinstance(part, dict)
+                and part.get("type") == "text"
+                and not str(part.get("text", "") or "").strip()
+                for part in content
+            )
+        return False
 
     def _sanitize_llm_history(self, history: list[Any]) -> tuple[list[Any], int]:
         """清理会导致 OpenAI 兼容接口 400 的明显非法 history 消息。
@@ -414,32 +440,76 @@ class LitePokePlugin(Star):
 
         return sanitized, removed
 
+    # ===================== 内部：conversation history 读写工具 =====================
+
+    @staticmethod
+    def _history_from_conversation(conv: Any) -> list[Any] | None:
+        """从 conversation 取 history 列表。
+
+        返回 None 表示 history 存在但无法解析——调用方不得写回，
+        否则会把整段对话覆盖成当前改动。
+        """
+        raw = getattr(conv, "content", None) or getattr(conv, "history", None) or []
+        if isinstance(raw, list):
+            return list(raw)
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                logger.warning("[litepoke] conversation history 不是合法 JSON，跳过写回以保护历史")
+                return None
+            if not isinstance(parsed, list):
+                logger.warning("[litepoke] conversation history 不是消息列表，跳过写回以保护历史")
+                return None
+            return parsed
+        return None
+
+    async def _commit_history(self, event: Any, cid: str, history: list[Any]) -> bool:
+        """把 history 写回 conversation；兼容旧版 update_conversation 位置参数签名。"""
+        conv_mgr = self.context.conversation_manager
+        try:
+            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
+            return True
+        except TypeError:
+            try:
+                await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
+                return True
+            except Exception as e:
+                logger.warning(f"[litepoke] 写回 conversation 失败: {e}")
+                return False
+        except Exception as e:
+            logger.warning(f"[litepoke] 写回 conversation 失败: {e}")
+            return False
+
+    @staticmethod
+    def _build_poke_event_message(poke_text: str) -> dict:
+        """构造写入 conversation 的戳一戳伪消息（纯文本 user 消息，不带 tool 字段）。"""
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": poke_text}],
+            "metadata": {
+                "source": "litepoke",
+                "event_type": "poke",
+                "timestamp": time.time(),
+            },
+        }
+
     async def _sanitize_current_conversation(self, event: Any, *, reason: str = "") -> bool:
         """把当前 conversation 中已残留的非法 LLM 消息清掉。"""
         cid, conv = await self._get_conversation_with_id(event)
         if not cid or conv is None:
             return False
 
-        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
-        if isinstance(raw_history, str):
-            try:
-                history = json.loads(raw_history)
-            except Exception:
-                return False
-        elif isinstance(raw_history, list):
-            history = list(raw_history)
-        else:
+        history = self._history_from_conversation(conv)
+        if history is None:
             return False
 
         sanitized, removed = self._sanitize_llm_history(history)
         if not removed:
             return False
 
-        conv_mgr = self.context.conversation_manager
-        try:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=sanitized)
-        except TypeError:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, sanitized)
+        if not await self._commit_history(event, cid, sanitized):
+            return False
 
         suffix = f" reason={reason}" if reason else ""
         logger.warning(f"[litepoke] 已清理非法 LLM history {removed} 条 id={cid}{suffix}")
@@ -453,6 +523,7 @@ class LitePokePlugin(Star):
         """把戳一戳 notice 写入官方 conversation，作为后续上下文的一部分。
 
         只写入一条纯文本 user 消息，不写 tool/tool_calls，避免污染工具调用链。
+        history 无法解析时返回 False（绝不写回），避免覆盖用户历史。
         """
         if not self.cfg.get("respond_poked_write_context", True):
             return False
@@ -463,33 +534,13 @@ class LitePokePlugin(Star):
         if not cid or conv is None:
             return False
 
-        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
-        if isinstance(raw_history, str):
-            try:
-                history = json.loads(raw_history)
-            except Exception:
-                history = []
-        elif isinstance(raw_history, list):
-            history = list(raw_history)
-        else:
-            history = []
+        history = self._history_from_conversation(conv)
+        if history is None:
+            return False
 
         history, removed_invalid = self._sanitize_llm_history(history)
 
-        event_message = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": poke_text,
-                }
-            ],
-            "metadata": {
-                "source": "litepoke",
-                "event_type": "poke",
-                "timestamp": time.time(),
-            },
-        }
+        event_message = self._build_poke_event_message(poke_text)
 
         # 避免同一 notice 分支异常重入时重复写入完全相同的最后一条事件。
         if history:
@@ -515,26 +566,13 @@ class LitePokePlugin(Star):
         if not replaced:
             history.append(event_message)
 
-        conv_mgr = self.context.conversation_manager
-        try:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
-            action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
-            suffix = f"，并清理非法 history {removed_invalid} 条" if removed_invalid else ""
-            logger.debug(f"[litepoke] 已{action}到 conversation id={cid}{suffix}")
-            return True
-        except TypeError:
-            try:
-                await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
-                action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
-                suffix = f"，并清理非法 history {removed_invalid} 条" if removed_invalid else ""
-                logger.debug(f"[litepoke] 已{action}到 conversation id={cid}{suffix}")
-                return True
-            except Exception as e:
-                logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
-                return False
-        except Exception as e:
-            logger.warning(f"[litepoke] 写入戳一戳事件到 conversation 失败: {e}")
+        if not await self._commit_history(event, cid, history):
             return False
+
+        action = "替换原始戳一戳消息" if replaced else "写入戳一戳事件"
+        suffix = f"，并清理非法 history {removed_invalid} 条" if removed_invalid else ""
+        logger.debug(f"[litepoke] 已{action}到 conversation id={cid}{suffix}")
+        return True
 
     async def _drop_recent_raw_poke_from_conversation(
         self,
@@ -552,16 +590,9 @@ class LitePokePlugin(Star):
         if not cid or conv is None:
             return False
 
-        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
-        if isinstance(raw_history, str):
-            try:
-                history = json.loads(raw_history)
-            except Exception:
-                history = []
-        elif isinstance(raw_history, list):
-            history = list(raw_history)
-        else:
-            history = []
+        history = self._history_from_conversation(conv)
+        if history is None:
+            return False
 
         removed = False
         for idx in range(len(history) - 1, max(-1, len(history) - 4), -1):
@@ -574,14 +605,9 @@ class LitePokePlugin(Star):
         if not removed:
             return False
 
-        conv_mgr = self.context.conversation_manager
-        try:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
-        except TypeError:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
-        except Exception as e:
-            logger.warning(f"[litepoke] 删除原始 outgoing 戳一戳 history 失败: {e}")
+        if not await self._commit_history(event, cid, history):
             return False
+
         suffix = f" reason={reason}" if reason else ""
         logger.debug(f"[litepoke] 已删除原始 outgoing 戳一戳 history id={cid}{suffix}")
         return True
@@ -619,29 +645,11 @@ class LitePokePlugin(Star):
         if not cid or conv is None:
             return False
 
-        raw_history = getattr(conv, "content", None) or getattr(conv, "history", None) or []
-        if isinstance(raw_history, str):
-            try:
-                history = json.loads(raw_history)
-            except Exception:
-                history = []
-        elif isinstance(raw_history, list):
-            history = list(raw_history)
-        else:
-            history = []
-
+        history = self._history_from_conversation(conv)
         if not history:
             return False
 
-        event_message = {
-            "role": "user",
-            "content": [{"type": "text", "text": poke_text}],
-            "metadata": {
-                "source": "litepoke",
-                "event_type": "poke",
-                "timestamp": time.time(),
-            },
-        }
+        event_message = self._build_poke_event_message(poke_text)
 
         changed = False
         seen_litepoke = False
@@ -676,11 +684,8 @@ class LitePokePlugin(Star):
         if not changed:
             return False
 
-        conv_mgr = self.context.conversation_manager
-        try:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history=history)
-        except TypeError:
-            await conv_mgr.update_conversation(event.unified_msg_origin, cid, history)
+        if not await self._commit_history(event, cid, history):
+            return False
 
         suffix = f" reason={reason}" if reason else ""
         logger.debug(f"[litepoke] 已延迟规范化 Poke history id={cid}{suffix}")
@@ -718,6 +723,17 @@ class LitePokePlugin(Star):
 
     # ===================== 内部：PokeLog 持久化 =====================
 
+    @staticmethod
+    def _plugin_data_dir() -> Path | None:
+        """<plugin_data>/astrbot_plugin_litepoke 目录；旧版 AstrBot 下返回 None。"""
+        if get_astrbot_plugin_data_path is None:
+            return None
+        try:
+            return Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_litepoke"
+        except Exception as e:
+            logger.warning(f"[litepoke] 推断插件数据目录失败: {e}")
+            return None
+
     def _resolve_poke_log_path(self) -> Path | None:
         """PokeLog JSON 文件路径
 
@@ -737,16 +753,19 @@ class LitePokePlugin(Star):
             self._poke_log_path = p
             return p
 
-        try:
-            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
-            data_root = Path(get_astrbot_plugin_data_path())
-            p = data_root / "astrbot_plugin_litepoke" / "poke_log.json"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            self._poke_log_path = p
-            return p
-        except Exception as e:
-            logger.warning(f"[litepoke] 推断 poke_log 路径失败: {e}")
+        base = self._plugin_data_dir()
+        if base is None:
+            logger.warning("[litepoke] 推断 poke_log 路径失败: 插件数据目录不可用")
             return None
+
+        p = base / "poke_log.json"
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[litepoke] 创建 poke_log 目录失败: {e}")
+            return None
+        self._poke_log_path = p
+        return p
 
     def _load_poke_log(self) -> None:
         if not self.cfg.get("poke_log_persist", True):
@@ -814,152 +833,26 @@ class LitePokePlugin(Star):
             logger.warning(f"[litepoke] 保存 PokeLog 失败: {e}")
 
     def _maybe_periodic_save(self) -> None:
-        """间隔写盘：每 poke_log_save_interval 秒写一次"""
+        """间隔写盘：每 poke_log_save_interval 秒写一次（未开启持久化时直接跳过）"""
+        if not self.cfg.get("poke_log_persist", True):
+            return
         interval = self._cfg_float("poke_log_save_interval", 60, min_value=1)
         if time.time() - self._poke_log.last_saved >= interval:
             self._save_poke_log()
 
-    # ===================== 内部：meme 索引 =====================
+    # ===================== 内部：直发文字 =====================
 
-    def _resolve_meme_dir(self) -> Path | None:
-        """获取 litepoke 自己的表情根目录（带缓存）
-
-        顺序：
-        1. 用户在配置里填了 meme_dir → 用之
-        2. 没填 → 用插件自己的数据目录 <plugin_data>/astrbot_plugin_litepoke/memes
-        """
-        if self._meme_dir is not None:
-            return self._meme_dir
-
-        # 1. 用户自定义
-        configured = (self.cfg.get("meme_dir", "") or "").strip()
-        if configured:
-            p = Path(configured).expanduser()
-            try:
-                p.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                pass
-            if p.is_dir():
-                self._meme_dir = p
-                return p
-            logger.warning(f"[litepoke] 配置的 meme_dir 不存在且无法创建: {p}")
-
-        # 2. 插件自己的数据目录
+    async def _send_direct_text(self, event: Any) -> str:
+        """bot 被戳且 mode=direct 时直接发一句文字，保证回应可见。"""
+        text = (self.cfg.get("respond_poked_text", "（戳了你一下）") or "").strip()
+        if not text:
+            return ""
         try:
-            from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
-
-            data_root = Path(get_astrbot_plugin_data_path())
-            candidate = data_root / "astrbot_plugin_litepoke" / "memes"
-            candidate.mkdir(parents=True, exist_ok=True)
-            self._meme_dir = candidate
-            return candidate
+            await event.send(MessageChain([Plain(text)]))
+            return text
         except Exception as e:
-            logger.warning(f"[litepoke] 创建自带 meme 目录失败: {e}")
-
-        return None
-
-    def _refresh_meme_index(self) -> None:
-        """扫描 meme_dir，建立 emotion -> [paths] 索引"""
-        meme_dir = self._resolve_meme_dir()
-        if meme_dir is None:
-            self._meme_index = {}
-            return
-
-        try:
-            mtimes = [meme_dir.stat().st_mtime]
-            mtimes.extend(sub.stat().st_mtime for sub in meme_dir.iterdir() if sub.is_dir())
-            current_mtime = max(mtimes)
-        except OSError:
-            self._meme_index = {}
-            return
-
-        # 如果根目录和子目录都没变化，跳过扫描
-        if current_mtime == self._meme_index_mtime and self._meme_index:
-            return
-
-        idx: dict[str, list[Path]] = {}
-        try:
-            for sub in meme_dir.iterdir():
-                if not sub.is_dir():
-                    continue
-                # 子目录名就是 emotion 标签
-                files = [
-                    p
-                    for p in sub.iterdir()
-                    if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
-                ]
-                if files:
-                    idx[sub.name] = files
-        except Exception as e:
-            logger.warning(f"[litepoke] 扫描 meme 目录失败: {e}")
-
-        self._meme_index = idx
-        self._meme_index_mtime = current_mtime
-
-    def _pick_meme(self, emotion: str | None) -> Path | None:
-        """根据 emotion 选一张 meme 图，找不到则回退到默认标签"""
-        if not self.cfg.get("enable_meme_fallback", True):
-            return None
-
-        self._refresh_meme_index()
-        if not self._meme_index:
-            return None
-
-        candidates: list[Path] = []
-        if emotion and emotion in self._meme_index:
-            candidates = self._meme_index[emotion]
-        else:
-            default = self.cfg.get("default_emotion", "baka")
-            if default in self._meme_index:
-                candidates = self._meme_index[default]
-            else:
-                # 都没匹配，随便抽一个标签
-                for paths in self._meme_index.values():
-                    candidates = paths
-                    break
-
-        if not candidates:
-            return None
-        return random.choice(candidates)
-
-    # ===================== 内部：发送回退 =====================
-
-    async def _send_fallback(self, event: Any, emotion: str | None = None) -> str:
-        """在非 aiocqhttp 平台发送回退表达（meme / face / text）
-
-        返回给人看的成功描述（喂给 LLM 当 tool result）
-        """
-        # 尝试 1：meme
-        meme_path = self._pick_meme(emotion)
-        if meme_path is not None:
-            try:
-                chain = MessageChain([Image.fromFileSystem(str(meme_path))])
-                await event.send(chain)
-                return f"已用表情包回应（{meme_path.parent.name}/{meme_path.name}）"
-            except Exception as e:
-                logger.warning(f"[litepoke] 发meme失败: {e}")
-
-        # 尝试 2：QQ face（不是所有平台都支持）
-        face_id = self._cfg_int("fallback_face_id", 0, min_value=0)
-        if face_id > 0:
-            try:
-                chain = MessageChain([Face(id=face_id)])
-                await event.send(chain)
-                return f"已用QQ表情回应（face_id={face_id}）"
-            except Exception as e:
-                logger.warning(f"[litepoke] 发face失败: {e}")
-
-        # 尝试 3：纯文字
-        text = (self.cfg.get("fallback_text", "") or "").strip()
-        if text:
-            try:
-                chain = MessageChain([Plain(text)])
-                await event.send(chain)
-                return f"已用文字回应（{text}）"
-            except Exception as e:
-                logger.warning(f"[litepoke] 发文字失败: {e}")
-
-        return "回退表达全部失败：meme/face/text 都没发出去"
+            logger.warning(f"[litepoke] 直发文字失败: {e}")
+            return ""
 
     # ===================== 核心：LLM Tool =====================
 
@@ -969,19 +862,16 @@ class LitePokePlugin(Star):
         event,
         user_id: str,
         times: int = 1,
-        emotion: str | None = None,
     ):
-        """戳一戳指定用户，或在不支持戳一戳的平台用表情包/文字回应。
+        """戳一戳指定用户（仅 aiocqhttp 平台可用）。
 
         当你觉得用户有点欠揍、想表达不满、或者单纯想互动时，可以调用这个工具。
-        aiocqhttp 平台会发送真实的戳一戳通知；其他平台（webchat/telegram/飞书等）
-        会发送一张情绪表情包来表达同样的"戳"。
+        aiocqhttp 平台会发送真实的戳一戳通知；其他平台没有"戳一戳"这个动作，
+        调用会返回失败提示，不会发任何消息。
 
         Args:
             user_id(string): 目标用户的QQ号，必须是纯数字字符串，例如 "12345678"
             times(number): aiocqhttp 平台下戳的次数，默认为 1，不建议超过 3
-            emotion(string): 表情包情绪标签，可选。例如 baka/angry/happy/sad。
-                            留空则使用配置的默认标签。仅在非 aiocqhttp 平台生效
         """
         if not user_id:
             return "戳一戳失败：user_id 不能为空"
@@ -991,7 +881,6 @@ class LitePokePlugin(Star):
         # 平台 & 作用域
         is_aiocqhttp = isinstance(event, AiocqhttpMessageEvent)
         group_id = event.get_group_id() or ""
-        scope = group_id or "_private"
 
         # 私聊开关
         if not group_id and self.cfg.get("only_group", True):
@@ -1005,7 +894,7 @@ class LitePokePlugin(Star):
         except Exception:
             pass
 
-        # ID 格式校验：aiocqhttp 要求纯数字；其他平台宽松（webchat 是字符串 user_id）
+        # ID 格式校验：aiocqhttp 要求纯数字 QQ 号
         if is_aiocqhttp and not user_id.isdigit():
             return "戳一戳失败：aiocqhttp 平台下 user_id 必须是纯数字 QQ 号"
 
@@ -1059,8 +948,8 @@ class LitePokePlugin(Star):
                 except Exception as friend_poke_err:
                     return f"戳好友失败：send_poke={send_poke_err}; friend_poke={friend_poke_err}"
 
-        # === 分支 B：非 aiocqhttp 平台用表情包回退 ===
-        return await self._send_fallback(event, emotion=emotion)
+        # === 分支 B：非 aiocqhttp 平台没有"戳一戳"这个动作 ===
+        return "戳一戳失败：当前平台不支持戳一戳（该动作仅 aiocqhttp 平台可用）"
 
     # ===================== 辅助：场景引导 =====================
 
@@ -1072,18 +961,22 @@ class LitePokePlugin(Star):
         ``mark_as_temp()``，块只发给 LLM、不写入会话历史，system_prompt
         前缀保持可缓存；旧版 AstrBot 自动回退 system_prompt 拼接。
         """
-        msg = event.message_str or ""
-        if not msg:
-            return
-
         self._maybe_prune_group_state()
 
         if not event.get_group_id() and self.cfg.get("only_group", True):
             return
+        # 清理放在 message_str 判空之前：bot 被戳的主动回应是 notice 事件，
+        # message_str 为空，但它同样会进 LLM 请求链，history 自清理不该被跳过。
         try:
             await self._sanitize_current_conversation(event, reason="on_llm_request")
         except Exception as e:
             logger.debug(f"[litepoke] LLM 请求前清理 history 失败: {e}")
+
+        msg = event.message_str or ""
+        if not msg:
+            # 没有用户文本时只做清理，不注入跟戳解释 / 统计 / 关键词引导——
+            # 这些通道都以“用户发了一条消息”为触发前提。
+            return
 
         def append_extra_part(block: str) -> None:
             if not block:
@@ -1151,7 +1044,6 @@ class LitePokePlugin(Star):
         if not recent and total_today == 0:
             return ""
 
-        from collections import Counter
         recent_counter = Counter(s for s, _ in recent)
 
         recent_text = ""
@@ -1251,33 +1143,21 @@ class LitePokePlugin(Star):
         """监听 aiocqhttp 戳一戳事件。
 
         支持两类场景：
-        - bot 被戳：群聊/私聊都可写入上下文并主动调 LLM 回应（私聊受 only_group 配置限制）。
+        - bot 被戳：群聊/私聊都可写入上下文并主动回应（direct 直发文字 / llm 调 LLM；私聊受 only_group 限制）。
         - 概率跟戳：仅群聊中别人戳别人时生效。
         """
         if not isinstance(event, AiocqhttpMessageEvent):
             return
-        if event.get_extra("litepoke_replayed_poke"):
+
+        poke = self._parse_poke_notice(event)
+        if poke is None:
             return
 
         self._maybe_prune_group_state()
 
-        # 解析戳一戳事件
-        raw = getattr(event.message_obj, "raw_message", None)
-        if not isinstance(raw, dict):
-            return
-        if raw.get("post_type") != "notice":
-            return
-        if raw.get("notice_type") != "notify":
-            return
-        if raw.get("sub_type") != "poke":
-            return
-
-        self_id = str(raw.get("self_id", "") or "")
-        user_id = str(raw.get("user_id", "") or "")        # 戳人的
-        target_id = str(raw.get("target_id", "") or "")    # 被戳的
-        group_id = str(raw.get("group_id", "") or "")
+        user_id, target_id, group_id, self_id = poke
+        scope = group_id or "_private"
         is_private = not group_id
-        gid = group_id
 
         # 私聊开关：与 poke_user 工具保持一致。
         if is_private and self.cfg.get("only_group", True):
@@ -1292,163 +1172,24 @@ class LitePokePlugin(Star):
         # bot 自己发出的戳一戳是 outgoing 动作，不应作为新的 user 输入进入上下文。
         # 注意：这里必须早于 follow_enabled；follow_enabled 只控制概率跟戳，不控制清理 outgoing notice。
         if user_id and self_id and user_id == self_id:
-            removed = await self._drop_recent_raw_poke_from_conversation(event, reason="bot_outgoing_poke")
-            if not removed:
-                asyncio.create_task(
-                    self._delayed_cleanup_poke_history(event, reason="bot_outgoing_poke")
-                )
-            self._diagnose(
-                "outgoing_poke",
-                "cleanup_only",
-                scope=group_id or "_private",
-                sender=user_id,
-                target=target_id,
-                removed_raw=removed,
+            await self._handle_outgoing_poke(
+                event,
+                user_id=user_id,
+                target_id=target_id,
+                scope=scope,
             )
             return
 
         # bot 自己被戳 → 累积 PokeLog + 写入上下文 + 可选主动调 LLM 回应
         if target_id and self_id and target_id == self_id:
-            self._poke_log.record(str(user_id), time.time())
-            self._poke_log.prune_recent(
-                time.time(),
-                self._cfg_int("poke_log_window", 60, min_value=1),
+            request = await self._handle_bot_poked(
+                event,
+                user_id=user_id,
+                target_id=target_id,
+                scope=scope,
             )
-            self._maybe_periodic_save()
-
-            # 先构造并写入 poke 事件：respond_poked_cd 只控制是否主动调 LLM，
-            # 不应阻止事件进入 conversation，否则 CD 期间的戳会在上下文里丢失。
-            try:
-                sender_name = event.get_sender_name() or "未知用户"
-            except Exception:
-                sender_name = "未知用户"
-            poke_info = {
-                "sender_id": str(user_id),
-                "sender_name": sender_name,
-                "target_id": str(self_id),
-                "is_poke_bot": True,
-            }
-            poke_text = self._build_poke_event_text(poke_info)
-            if not poke_text:
-                self._diagnose(
-                    "respond_poked",
-                    "empty_poke_text",
-                    scope=group_id or "_private",
-                    sender=user_id,
-                    target=target_id,
-                )
-                return
-            wrote_context = await self._append_poke_event_to_conversation(event, poke_text)
-            self._diagnose(
-                "respond_poked",
-                "recorded",
-                scope=group_id or "_private",
-                sender=user_id,
-                wrote_context=wrote_context,
-                recent=len(self._poke_log.recent),
-                today=self._poke_log.total_today(),
-            )
-            asyncio.create_task(
-                self._delayed_cleanup_poke_history(
-                    event,
-                    poke_text=poke_text,
-                    reason="incoming_poke",
-                )
-            )
-
-            # 主动回应：主动触发 LLM 回应（v1.3.0+）
-            if not self.cfg.get("respond_poked_enabled", True):
-                self._diagnose(
-                    "respond_poked",
-                    "disabled",
-                    scope=group_id or "_private",
-                    sender=user_id,
-                )
-                return
-
-            # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
-            respond_cd = self._cfg_float("respond_poked_cd", 10, min_value=0)
-            elapsed = time.time() - self._last_respond_poked.get(group_id or "_private", 0.0)
-            if elapsed < respond_cd:
-                self._diagnose(
-                    "respond_poked",
-                    "cooldown",
-                    scope=group_id or "_private",
-                    sender=user_id,
-                    elapsed=round(elapsed, 2),
-                    cd=respond_cd,
-                )
-                return
-
-            # 概率控制
-            respond_prob = self._cfg_float("respond_poked_prob", 1.0, min_value=0.0, max_value=1.0)
-            if respond_prob <= 0:
-                self._diagnose(
-                    "respond_poked",
-                    "prob_zero",
-                    scope=group_id or "_private",
-                    sender=user_id,
-                    prob=respond_prob,
-                )
-                return
-            roll = random.random()
-            if roll >= respond_prob:
-                self._diagnose(
-                    "respond_poked",
-                    "prob_miss",
-                    scope=group_id or "_private",
-                    sender=user_id,
-                    roll=round(roll, 4),
-                    prob=respond_prob,
-                )
-                return
-
-            # 非 CD：默认直接发送回退表达，避免 notice 事件重投递后只走插件监听、没有触发 LLM。
-            # 非 direct 模式统一走原生 LLM 请求链；replay 仅作为 llm 的兼容别名。
-            respond_mode = str(
-                self.cfg.get("respond_poked_mode", "direct") or "direct"
-            ).strip().lower()
-            self._last_respond_poked[group_id or "_private"] = time.time()
-
-            if respond_mode not in {"replay", "llm"}:
-                result = await self._send_fallback(event)
-                event.stop_event()
-                logger.info(
-                    f"[litepoke] 主动回应被戳：scope={group_id or '_private'} sender={user_id} "
-                    f"-> 直发回退响应: {result}"
-                )
-                return
-
-            # llm/replay 模式：直接走 AstrBot 原生 LLM 请求链。
-            try:
-                prompt_template = self.cfg.get(
-                    "respond_poked_prompt",
-                    "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
-                )
-                conversation = await self._get_conversation(event)
-                # 事件已写入 conversation 时，prompt 只引用上文，避免同一 poke_text
-                # 同时出现在历史和新 user 消息里，让模型误判被戳两次。
-                if wrote_context and conversation is not None:
-                    poke_event_ref = "[请参考上文最新的戳一戳事件]"
-                else:
-                    poke_event_ref = poke_text
-                llm_prompt = prompt_template.format(poke_event=poke_event_ref)
-
-                logger.info(
-                    f"[litepoke] 主动回应被戳：scope={group_id or '_private'} sender={user_id} "
-                    "-> 直接请求 LLM 响应"
-                )
-                yield event.request_llm(prompt=llm_prompt, conversation=conversation)
-            except Exception as e:
-                logger.warning(f"[litepoke] 主动回应被戳 LLM 响应失败: {e}")
-                try:
-                    result = await self._send_fallback(event)
-                    event.stop_event()
-                    logger.info(
-                        f"[litepoke] LLM 响应失败，已直发回退响应: {result}"
-                    )
-                except Exception as fallback_e:
-                    logger.warning(f"[litepoke] 戳一戳回退响应失败: {fallback_e}")
+            if request is not None:
+                yield request
             return
 
         # 概率跟戳只支持群聊；私聊中不是 bot 被戳/不是 bot 发出的 poke，到这里直接结束。
@@ -1461,23 +1202,222 @@ class LitePokePlugin(Star):
             )
             return
 
+        await self._handle_follow_poke(
+            event,
+            user_id=user_id,
+            target_id=target_id,
+            scope=scope,
+        )
+
+    @staticmethod
+    def _parse_poke_notice(event) -> tuple[str, str, str, str] | None:
+        """解析 OneBot 戳一戳 notice，返回 (user_id, target_id, group_id, self_id)。
+
+        兼容两种上报形状：notice_type=notify + sub_type=poke（OneBot v11 标准）
+        与 notice_type=poke（部分实现）。AstrBot 自身只看 sub_type，这里放宽到
+        notice_type=poke，避免漏掉只标了后者的事件。
+        """
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("post_type") != "notice":
+            return None
+        notice_type = str(raw.get("notice_type") or "")
+        sub_type = str(raw.get("sub_type") or "")
+        if sub_type != "poke" and notice_type != "poke":
+            return None
+        return (
+            str(raw.get("user_id", "") or ""),
+            str(raw.get("target_id", "") or ""),
+            str(raw.get("group_id", "") or ""),
+            str(raw.get("self_id", "") or ""),
+        )
+
+    async def _handle_outgoing_poke(
+        self, event, *, user_id: str, target_id: str, scope: str
+    ) -> None:
+        """处理 bot 自己发出的戳一戳（outgoing notice）：只清理上下文，不触发回应。"""
+        removed = await self._drop_recent_raw_poke_from_conversation(
+            event, reason="bot_outgoing_poke"
+        )
+        if not removed:
+            self._track_task(
+                self._delayed_cleanup_poke_history(event, reason="bot_outgoing_poke")
+            )
+        self._diagnose(
+            "outgoing_poke",
+            "cleanup_only",
+            scope=scope,
+            sender=user_id,
+            target=target_id,
+            removed_raw=removed,
+        )
+
+    async def _handle_bot_poked(
+        self, event, *, user_id: str, target_id: str, scope: str
+    ) -> Any | None:
+        """处理 bot 被戳：记录统计、写入上下文，并按配置返回一次 LLM 请求。
+
+        返回 None 表示本轮不需要/无法发起 LLM 请求（已计数并写入上下文，
+        或已直接发送文字）。
+        """
+        now = time.time()
+        self._poke_log.record(str(user_id), now)
+        self._poke_log.prune_recent(now, self._cfg_int("poke_log_window", 60, min_value=1))
+        self._maybe_periodic_save()
+
+        # 先构造并写入 poke 事件：respond_poked_cd 只控制是否主动调 LLM，
+        # 不应阻止事件进入 conversation，否则 CD 期间的戳会在上下文里丢失。
+        try:
+            sender_name = event.get_sender_name() or "未知用户"
+        except Exception:
+            sender_name = "未知用户"
+        poke_text = self._build_poke_event_text(
+            {
+                "sender_id": str(user_id),
+                "sender_name": sender_name,
+                "target_id": str(target_id),
+                "is_poke_bot": True,
+            }
+        )
+        if not poke_text:
+            self._diagnose(
+                "respond_poked",
+                "empty_poke_text",
+                scope=scope,
+                sender=user_id,
+                target=target_id,
+            )
+            return None
+
+        wrote_context = await self._append_poke_event_to_conversation(event, poke_text)
+        self._diagnose(
+            "respond_poked",
+            "recorded",
+            scope=scope,
+            sender=user_id,
+            wrote_context=wrote_context,
+            recent=len(self._poke_log.recent),
+            today=self._poke_log.total_today(),
+        )
+        self._track_task(
+            self._delayed_cleanup_poke_history(
+                event,
+                poke_text=poke_text,
+                reason="incoming_poke",
+            )
+        )
+
+        # 主动回应：主动触发 LLM 回应（v1.3.0+）
+        if not self.cfg.get("respond_poked_enabled", True):
+            self._diagnose("respond_poked", "disabled", scope=scope, sender=user_id)
+            return None
+
+        # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
+        respond_cd = self._cfg_float("respond_poked_cd", 10, min_value=0)
+        elapsed = now - self._last_respond_poked.get(scope, 0.0)
+        if elapsed < respond_cd:
+            self._diagnose(
+                "respond_poked",
+                "cooldown",
+                scope=scope,
+                sender=user_id,
+                elapsed=round(elapsed, 2),
+                cd=respond_cd,
+            )
+            return None
+
+        # 概率控制
+        respond_prob = self._cfg_float(
+            "respond_poked_prob", 1.0, min_value=0.0, max_value=1.0
+        )
+        if respond_prob <= 0:
+            self._diagnose(
+                "respond_poked",
+                "prob_zero",
+                scope=scope,
+                sender=user_id,
+                prob=respond_prob,
+            )
+            return None
+        roll = random.random()
+        if roll >= respond_prob:
+            self._diagnose(
+                "respond_poked",
+                "prob_miss",
+                scope=scope,
+                sender=user_id,
+                roll=round(roll, 4),
+                prob=respond_prob,
+            )
+            return None
+
+        # 非 CD：默认直发一句文字，避免 notice 事件重投递后只走插件监听、没有触发 LLM。
+        # 非 direct 模式统一走原生 LLM 请求链；replay 仅作为 llm 的兼容别名。
+        respond_mode = str(
+            self.cfg.get("respond_poked_mode", "direct") or "direct"
+        ).strip().lower()
+        # CD 在发起响应前就记下：即使后续 LLM 链路失败或文字发送失败，也按“已响应”计，
+        # 避免失败重试把群刷屏。这是刻意的“防刷屏优先”取舍。
+        self._last_respond_poked[scope] = time.time()
+
+        if respond_mode not in {"replay", "llm"}:
+            result = await self._send_direct_text(event)
+            event.stop_event()
+            logger.info(
+                f"[litepoke] 主动回应被戳：scope={scope} sender={user_id} "
+                f"-> 直发文字: {result or '失败'}"
+            )
+            return None
+
+        # llm/replay 模式：直接走 AstrBot 原生 LLM 请求链。
+        try:
+            prompt_template = self.cfg.get(
+                "respond_poked_prompt",
+                "{poke_event}。请用符合人设的方式简短回应（1-2 句），可以反戳回去（用 poke_user 工具）或吐槽。",
+            )
+            conversation = await self._get_conversation(event)
+            # 事件已写入 conversation 时，prompt 只引用上文，避免同一 poke_text
+            # 同时出现在历史和新 user 消息里，让模型误判被戳两次。
+            if wrote_context and conversation is not None:
+                poke_event_ref = "[请参考上文最新的戳一戳事件]"
+            else:
+                poke_event_ref = poke_text
+            llm_prompt = prompt_template.format(poke_event=poke_event_ref)
+
+            logger.info(
+                f"[litepoke] 主动回应被戳：scope={scope} sender={user_id} "
+                "-> 直接请求 LLM 响应"
+            )
+            return event.request_llm(prompt=llm_prompt, conversation=conversation)
+        except Exception as e:
+            logger.warning(f"[litepoke] 主动回应被戳 LLM 响应失败: {e}")
+            result = await self._send_direct_text(event)
+            if result:
+                event.stop_event()
+                logger.info(f"[litepoke] LLM 响应失败，已直发文字: {result}")
+            return None
+
+    async def _handle_follow_poke(
+        self, event, *, user_id: str, target_id: str, scope: str
+    ) -> None:
+        """群内概率跟戳：CD + vibe 调整 + 掷骰，命中后戳一下并记录解释。"""
         if not self.cfg.get("follow_enabled", True):
             self._diagnose(
                 "follow_poke",
                 "disabled",
-                group=gid,
+                group=scope,
                 sender=user_id,
                 target=target_id,
             )
             return
 
-        # 概率判定
         prob = self._cfg_float("follow_prob", 0.1, min_value=0.0, max_value=1.0)
         if prob <= 0:
             self._diagnose(
                 "follow_poke",
                 "prob_zero",
-                group=gid,
+                group=scope,
                 sender=user_id,
                 target=target_id,
                 prob=prob,
@@ -1486,12 +1426,12 @@ class LitePokePlugin(Star):
 
         # CD 兜底：避免群内连续戳一戳事件时连续跟戳
         follow_cd = self._cfg_float("follow_cd", 3, min_value=0)
-        elapsed = time.time() - self._last_follow_poke.get(gid, 0.0)
+        elapsed = time.time() - self._last_follow_poke.get(scope, 0.0)
         if elapsed < follow_cd:
             self._diagnose(
                 "follow_poke",
                 "cooldown",
-                group=gid,
+                group=scope,
                 sender=user_id,
                 target=target_id,
                 elapsed=round(elapsed, 2),
@@ -1500,13 +1440,13 @@ class LitePokePlugin(Star):
             return
 
         # === vibe 决策：用群内滑动窗口调整概率 ===
-        adjusted_prob, reason = self._vibe_adjust(gid, target_id, prob)
+        adjusted_prob, reason = self._vibe_adjust(scope, target_id, prob)
         roll = random.random()
         if roll >= adjusted_prob:
             self._diagnose(
                 "follow_poke",
                 "prob_miss",
-                group=gid,
+                group=scope,
                 sender=user_id,
                 target=target_id,
                 roll=round(roll, 4),
@@ -1516,51 +1456,59 @@ class LitePokePlugin(Star):
             )
             return
 
-        # 跟戳
         try:
             await event.bot.group_poke(
-                group_id=int(group_id),
+                group_id=int(scope),
                 user_id=int(target_id),
             )
-            self._last_follow_poke[gid] = time.time()
-            # 记录到 vibe
-            vibe = self._vibe.get(gid)
-            if vibe is None:
-                vibe = GroupVibe()
-                self._vibe[gid] = vibe
-            window = self._cfg_int("vibe_window", 60, min_value=1)
-            now = time.time()
-            vibe.recent_pokes.append(now)
-            vibe.last_poke_target = str(target_id)
-            vibe.prune(now, window)
-            self._follow_traces.append(
-                FollowPokeTrace(
-                    ts=now,
-                    group_id=gid,
-                    sender_id=str(user_id),
-                    target_id=str(target_id),
-                    base_prob=prob,
-                    adjusted_prob=adjusted_prob,
-                    roll=roll,
-                    vibe_reason=reason,
-                )
-            )
-            self._diagnose(
-                "follow_poke",
-                "hit",
-                group=gid,
-                sender=user_id,
-                target=target_id,
-                roll=round(roll, 4),
-                base_prob=prob,
-                adjusted_prob=round(adjusted_prob, 4),
-                vibe_reason=reason,
-            )
-            logger.debug(f"[litepoke] 跟戳 group={gid} target={target_id} reason={reason}")
         except Exception as e:
             logger.warning(f"[litepoke] 跟戳失败: {e}")
+            self._diagnose(
+                "follow_poke",
+                "send_failed",
+                group=scope,
+                sender=user_id,
+                target=target_id,
+                error=e,
+            )
+            return
 
-    def _vibe_adjust(self, gid: str, target_id: int, base_prob: float) -> tuple[float, str]:
+        now = time.time()
+        self._last_follow_poke[scope] = now
+        # 记录到 vibe
+        vibe = self._vibe.get(scope)
+        if vibe is None:
+            vibe = GroupVibe()
+            self._vibe[scope] = vibe
+        window = self._cfg_int("vibe_window", 60, min_value=1)
+        vibe.recent_pokes.append(now)
+        vibe.prune(now, window)
+        self._follow_traces.append(
+            FollowPokeTrace(
+                ts=now,
+                group_id=scope,
+                sender_id=str(user_id),
+                target_id=str(target_id),
+                base_prob=prob,
+                adjusted_prob=adjusted_prob,
+                roll=roll,
+                vibe_reason=reason,
+            )
+        )
+        self._diagnose(
+            "follow_poke",
+            "hit",
+            group=scope,
+            sender=user_id,
+            target=target_id,
+            roll=round(roll, 4),
+            base_prob=prob,
+            adjusted_prob=round(adjusted_prob, 4),
+            vibe_reason=reason,
+        )
+        logger.debug(f"[litepoke] 跟戳 group={scope} target={target_id} reason={reason}")
+
+    def _vibe_adjust(self, gid: str, target_id: str, base_prob: float) -> tuple[float, str]:
         """根据群内滑动窗口调整跟戳概率
 
         规则（都靠滑动窗口 + deque，O(1)）：
@@ -1586,7 +1534,8 @@ class LitePokePlugin(Star):
 
         active_threshold = self._cfg_int("vibe_active_threshold", 5, min_value=0)
         quiet_threshold = self._cfg_int("vibe_quiet_threshold", 1, min_value=0)
-        max_in_window = self._cfg_int("vibe_max_in_window", 1, min_value=0)
+        # 0 会让规则 1 恒成立（等于静默关闭跟戳），跟戳开关请用 follow_enabled。
+        max_in_window = self._cfg_int("vibe_max_in_window", 1, min_value=1)
 
         # 规则 1：窗口内跟戳次数已达上限 → 跳过
         if poke_count >= max_in_window:
@@ -1613,10 +1562,16 @@ class LitePokePlugin(Star):
     # ===================== 生命周期 =====================
 
     async def terminate(self):
+        for task in list(self._bg_tasks):
+            task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        self._bg_tasks.clear()
+
         self._save_poke_log()
         self._guide_last.clear()
-        self._meme_index.clear()
         self._vibe.clear()
+        self._follow_traces.clear()
         self._last_follow_poke.clear()
         self._last_respond_poked.clear()
-        logger.info("[litepoke] 插件已卸载，guide/meme/vibe/PokeLog 状态已清空")
+        logger.info("[litepoke] 插件已卸载，guide/vibe/PokeLog 状态已清空")

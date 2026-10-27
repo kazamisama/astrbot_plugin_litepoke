@@ -3,11 +3,11 @@
 一个把"戳一戳"能力做轻的 AstrBot 插件：
 
 - **aiocqhttp（QQ）平台**：发送真实的戳一戳通知
-- **其他平台**（webchat / telegram / 飞书 / 企业微信等）：用表情包 / QQ face / 文字模拟"戳"这个动作
+- **其他平台**（webchat / telegram / 飞书等）：没有"戳一戳"这个动作，调用 `poke_user` 会返回失败提示
 - **LLM 自主判断**：注册 `poke_user` 工具，模型自行决定何时戳
 - **场景引导钩子**：检测关键词 → 以临时 TextPart 注入提示 → 让 LLM 考虑调用
 - **群内跟戳**（v1.1+）：监听群内戳一戳事件，按概率跟戳"别人戳别人"，基于滑动窗口的轻量群氛围决策
-- **被戳回应**（v1.4+）：bot 被戳时把 poke notice 伪造成普通文字消息重投递，群聊/私聊统一走 AstrBot 标准消息链路
+- **被戳回应**（v1.3+）：bot 被戳时按 `respond_poked_mode` 主动回应（`direct` 直发文字 / `llm` 走 AstrBot 原生 LLM 请求链）
 
 代码刻意保持单文件、零依赖、易读易改。
 
@@ -17,11 +17,9 @@
 
 | 项 | 说明 |
 |---|---|
-| 平台 | aiocqhttp（真戳）+ 其他平台（表情回退） |
-| 调用方式 | LLM tool 自主调用 + 关键词场景引导 + **群内概率跟戳** + **被戳伪消息重投递** |
-| 表情来源 | 插件自带数据目录，**不依赖** meme_manager |
+| 平台 | aiocqhttp（真戳）；其他平台**不支持戳一戳**，调用返回失败提示 |
+| 调用方式 | LLM tool 自主调用 + 关键词场景引导 + **群内概率跟戳** + **被戳主动回应** |
 | 限频 | 引导CD + 跟戳CD + 被戳主动响应CD；`poke_user` 工具本身不再做静默CD |
-| 失败回退 | meme → QQ face → 文字，三级降级 |
 | 群氛围决策 | 60s 滑动窗口，O(1) 规则调概率，**不调 LLM** |
 | PokeLog | JSON 持久化带 `schema_version`，保存采用临时文件原子替换，坏文件会保留为 `.corrupt.<timestamp>` |
 | 诊断日志 | 可选 `debug_diagnostics`，排查 CD、概率未命中、私聊禁用、路径不可用等跳过原因 |
@@ -29,45 +27,32 @@
 
 ---
 
-## 安装
+## 工作原理
 
-把整个 `astrbot_plugin_litepoke/` 文件夹丢到 AstrBot 的 `data/plugins/` 目录下，重启 AstrBot 即可。
-
-首次启动会**自动创建**表情根目录：
-
+```text
+LLM 决定戳人 ──> poke_user 工具（aiocqhttp 发真实戳一戳；其他平台返回不支持）
+用户发消息 ──> on_llm_request：
+   ├─ 自动跟戳解释（临时 TextPart，仅发给 LLM）
+   ├─ PokeLog 统计（可选，默认关闭）
+   └─ 关键词引导（命中 trigger_keywords 且过 guide_cd）
+群内消息 ──> on_group_message：维护每个群的滑动窗口（vibe）
+戳一戳事件 ──> on_group_poke：
+   ├─ bot 被戳 ──> PokeLog + 写入上下文 + 回应（direct 直发 / llm 请求）
+   ├─ 别人戳别人 ──> 按 vibe 调整后的概率跟戳
+   └─ bot 自己发出的戳 ──> 清理历史中残留的原始 poke 记录
 ```
-data/plugin_data/astrbot_plugin_litepoke/memes/
-```
+
+- 注入给 LLM 的临时提示统一走 `extra_user_content_parts` + `mark_as_temp()`，不写入会话历史，也不破坏 system prompt 前缀缓存。
+- 跟戳（`follow_*`）和群氛围（`vibe_*`）是纯规则动作，不触发 LLM；被戳回应是唯一会主动发起 LLM 请求的路径。
+- 主动回应默认 `respond_poked_mode=direct`：直接发一句文字，不依赖 LLM 是否可用；需要模型参与时改成 `llm`。
 
 ---
 
-## 表情包怎么放
+## 安装
 
-**目录结构**：子目录名 = emotion 标签名，里面放图片。
+把整个 `astrbot_plugin_litepoke/` 文件夹丢到 AstrBot 的 `data/plugins/` 目录下，重启 AstrBot 即可。要求 AstrBot >= 4.13.0（见 `metadata.yaml` 的 `astrbot_version`）。
 
-```
-data/plugin_data/astrbot_plugin_litepoke/memes/
-├── baka/        # 吐槽、可爱的嘟嘴
-│   ├── 1.jpg
-│   └── 2.png
-├── sad/         # 低落失意
-├── angry/       # 抱怨反驳
-├── happy/       # 开心庆祝
-├── cry/         # 委屈带泪
-├── shy/         # 害羞
-└── ...          # 想加几个标签就建几个目录
-```
-
-**支持的文件格式**：`.jpg` `.jpeg` `.png` `.gif` `.webp` `.bmp`
-
-**默认行为**：
-
-- LLM 传了 `emotion`（如 `baka`） → 从 `memes/baka/` 随机选一张
-- LLM 没传 / 标签不存在 → 用配置的 `default_emotion`（默认 `baka`）
-- 标签目录都没有 → 随机抽一个存在的标签
-- meme 全空 → 降级到 QQ face → 再降级到文字
-
-**也可以指向其他目录**：在配置里填 `meme_dir` 覆盖默认路径。
+PokeLog 运行时数据保存在 `data/plugin_data/astrbot_plugin_litepoke/poke_log.json`，首次写盘时自动创建。
 
 ---
 
@@ -96,22 +81,13 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 | `guide_cd` | 30 | 同一会话内引导提示最小间隔（秒） |
 | `guide_prompt` | 见配置 | 普通消息命中关键词时以临时 TextPart 注入的轻量引导；不处理 bot 被戳事件 |
 
-### 表情回退
-
-| 配置项 | 默认 | 说明 |
-|---|---|---|
-| `enable_meme_fallback` | true | 非 aiocqhttp 平台是否启用表情回退 |
-| `meme_dir` | 空 | 自定义表情根目录；留空 = 插件自带目录 |
-| `default_emotion` | `baka` | 默认 emotion 标签 |
-| `fallback_face_id` | 0 | meme 不可用时的 QQ face ID；0=关闭 |
-| `fallback_text` | `（戳了你一下）` | 所有回退都失败时的文字 |
-
 ### bot 被戳回应
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `respond_poked_enabled` | true | 主动回应被戳开关 |
-| `respond_poked_mode` | `direct` | `direct`=直接表情/文字回退，最稳定；`llm`/`replay`=走 AstrBot 原生 LLM 请求链 |
+| `respond_poked_mode` | `direct` | `direct`=直接发一句话，最稳定；`llm`/`replay`=走 AstrBot 原生 LLM 请求链 |
+| `respond_poked_text` | `（戳了你一下）` | `direct` 模式发送的文字；LLM 请求失败时也用它兜底 |
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
 | `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation；CD 内只写入不即时回应 |
@@ -158,14 +134,13 @@ data/plugin_data/astrbot_plugin_litepoke/memes/
 ## 工具签名（给 LLM 看）
 
 ```
-poke_user(user_id, times=1, emotion=None)
+poke_user(user_id, times=1)
 ```
 
 - `user_id`（必填）：目标用户ID
-  - aiocqhttp：必须是纯数字 QQ 号；群聊会带 `group_id` 调用，私聊会优先使用 OneBot `send_poke`，失败时再尝试 `friend_poke` 兜底
-  - 其他平台：任意字符串（webchat 用 sender_id 即可）
-- `times`（可选）：aiocqhttp 下戳的次数，1-3
-- `emotion`（可选）：表情标签名，如 `baka` / `angry` / `sad`。仅非 aiocqhttp 生效
+  - aiocqhttp：必须是纯数字 QQ 号；群聊会带 `group_id` 调用，私聊（需 `only_group=false`）会优先使用 OneBot `send_poke`，失败时再尝试 `friend_poke` 兜底
+  - 其他平台：调用会返回「当前平台不支持戳一戳」，不会发任何消息
+- `times`（可选）：aiocqhttp 下戳的次数，默认 1，上限 `poke_max_times`（默认 3），超出会被截断
 
 **tool 返回值**是中文文本，会作为 tool result 喂回 LLM，用于让 LLM 继续生成总结回复。
 
@@ -181,19 +156,13 @@ poke_user(user_id, times=1, emotion=None)
 
 `trigger_keywords` 命中普通消息时也会自动注入轻量引导提示（`guide_prompt`）。它只负责提醒 LLM 有 `poke_user` 这个互动工具；bot 被戳后的即时回应由 `respond_poked_prompt` 单独控制。
 
-### 2. 表情选择策略
-
-- 让 LLM **每次都传 `emotion`**：表达更精准，但 LLM 偶尔会瞎传
-- 让 LLM **不传 `emotion`**：完全用默认标签（`baka`），简单稳定
-- 折中：在引导 prompt 里**强烈建议**传 emotion，但不强制
-
-### 3. 跨平台部署
+### 2. 平台差异
 
 - QQ 群：真戳，体验最好
-- 私聊（aiocqhttp）：戳好友，效果也不错
-- webchat / 其他：自动降级到表情包，推荐先放 5-10 个常用标签的表情
+- 私聊（aiocqhttp）：戳好友，效果也不错（需 `only_group=false`，默认关闭）
+- webchat / telegram / 飞书等：没有"戳一戳"这个动作，也收不到戳一戳事件；`poke_user` 会返回不支持提示，不会发任何消息
 
-### 4. 跟戳调优
+### 3. 跟戳调优
 
 `follow_prob` 是基础概率，**实际跟戳概率会按 vibe 调整**：
 
@@ -215,7 +184,11 @@ poke_user(user_id, times=1, emotion=None)
 
 **调试方法**：排查“为什么没跟戳/没回应”时，先在插件配置里临时打开 `debug_diagnostics`，AstrBot 日志里搜 `[litepoke][diag]`。常见 `reason` 包括 `hit`、`cooldown`、`prob_miss`、`disabled`、`private_disabled`、`path_unavailable`。正常运行时建议关掉，避免日志太碎。
 
-### 5. PokeLog 累积日志（v1.2+）
+---
+
+## 行为说明
+
+### 4. PokeLog 累积日志（v1.2+）
 
 PokeLog 现在主要作为**统计缓存**保留，不再默认注入 LLM 提示词。v1.3.4+ 已经会把 bot 被戳的 notice 事件写入官方 conversation，通常不需要再用 PokeLog 做延迟感知。
 
@@ -248,9 +221,9 @@ data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 
 **消费机制**：只有开启 `poke_log_inject_enabled` 并实际注入时，`recent` 才会被消费清空；`daily` 不清空，跨重启保留 7 天。
 
-### 6. bot 被戳主动回应（v1.3+）
+### 5. bot 被戳主动回应（v1.3+）
 
-litepoke 自 v1.3 起在 bot 被戳时会**主动**走完整响应链：累积 PokeLog → 调 LLM（或回退）→ 发出可见消息。早期版本（≤ v1.2）只静默累积 PokeLog，**不会**主动回应被戳；从 v1.3 起默认会主动回应，让被戳变得“有触感”。
+litepoke 自 v1.3 起在 bot 被戳时会**主动**回应：累积 PokeLog → 按 `respond_poked_mode` 发出可见消息（`direct` 直发 `respond_poked_text`，`llm`/`replay` 触发一次 LLM 调用）。早期版本（≤ v1.2）只静默累积 PokeLog，**不会**主动回应被戳；v1.5 起默认走 `direct`，保证被戳一定有回应，且不依赖 LLM 是否可用。
 
 **触发流程**：
 
@@ -262,19 +235,18 @@ on_group_poke 触发
    ↓ _build_poke_event_text 构造戳一戳事件文本
    ↓ 可选：写入官方 conversation（respond_poked_write_context；不受 respond_poked_cd 影响）
    ↓ 检查 respond_poked_enabled
-   ↓ 检查 respond_poked_cd（仅控制是否主动调 LLM，防刷屏）
+   ↓ 检查 respond_poked_cd（direct 文字与 LLM 响应共用，防刷屏）
    ↓ 检查 respond_poked_prob（概率）
-   ↓ 优先获取当前 conversation
-   ↓ 获取全局 LLM 工具集（确保 poke_user 可用）
-   ↓ conversation 可用：event.request_llm(prompt, conversation, func_tool_manager, tool_set) → yield
-   ↓ conversation 不可用：获取当前 persona system_prompt 后降级 request_llm(prompt, session_id, system_prompt, func_tool_manager, tool_set) → yield
+   ↓ respond_poked_mode=direct（默认）：直发 respond_poked_text → event.stop_event()
+   ↓ respond_poked_mode=llm/replay：获取官方 conversation → event.request_llm(prompt, conversation) → yield
    ↓
-LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应；降级路线只结合人格和 poke_event 文本
+LLM 结合 conversation 中的 poke_event（或 prompt 内联的 poke_event）与人格决定回应；
+LLM 请求链抛错时改为直发 respond_poked_text
 ```
 
 这里不使用 `guide_prompt`；`guide_prompt` 只用于普通消息命中关键词时的轻量工具提醒，被戳事件由 `respond_poked_prompt` 独立控制。
 
-**默认 prompt**：
+**默认 prompt（`{poke_event}` 替换后的示例）**：
 
 ```text
 [戳一戳事件]有人戳了你，发起者是 alice(ID:123456)。
@@ -288,16 +260,16 @@ LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应
 - `respond_poked_cd = 10`（默认 10s）— 群友狂戳 bot 时 10 秒只回 1 次
 - `respond_poked_enabled = false` — 完全关掉被戳主动回应，回到 v1.2.0 行为（只累积 PokeLog）
 
-### 7. 戳一戳事件和 LLM 上下文
+### 6. 戳一戳事件和 LLM 上下文
 
 - 戳一戳是 OneBot 的 `notice/poke` 事件，平台本身**默认不进** LLM 对话上下文
 - `poke_user` tool 是 LLM 在**用户发消息**时自主决定调用的工具
 - 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
 - PokeLog（v1.2+）通过 `on_llm_request` 钩子以临时 TextPart **延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
 - 提示词注入（v1.4.9+）统一走 `extra_user_content_parts` + `mark_as_temp()`：跟戳解释 / PokeLog / 关键词引导只发给 LLM，不写入会话历史，也不污染 system_prompt 前缀缓存
-- **主动回应**（v1.3+）：bot 被戳时**主动**触发一次 LLM 调用，让 LLM 立刻回应
+- **主动回应**（v1.3+）：bot 被戳时按 `respond_poked_mode` 回应；`llm`/`replay` 触发一次 LLM 调用，`direct` 直接发文字
 - **写入上下文**（v1.3.4+）：开启 `respond_poked_write_context` 后，bot 被戳的 notice 会作为一条纯文本 `user` 消息写入官方 conversation，后续普通对话也能自然感知这次戳一戳事件
-- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。主动回应时会优先传入官方 conversation；由于当前戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则降级为只传 `poke_event` prompt + 当前 persona `system_prompt`
+- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。`llm`/`replay` 模式下会优先传入官方 conversation；由于当前戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则把 `poke_event` 直接内联进 prompt 发起 LLM 请求；`respond_poked_mode=direct` 或 LLM 请求链抛错时改为直发 `respond_poked_text`
 
 ---
 
@@ -308,9 +280,9 @@ LLM 结合 conversation 中的 poke_event、最近上下文和人格决定回应
 - 本插件已修正。如果自定义时报这个错，对照 `main.py` 顶部的 import。
 
 **调用 tool 后没收到任何消息**
-- 检查 `meme_dir` 是否有图
+- 确认当前平台是 aiocqhttp：其他平台没有戳一戳动作，工具会直接返回失败提示
 - 看 AstrBot 日志，会打印 `[litepoke]` 前缀的警告
-- 确认 `enable_meme_fallback` 没被关掉
+- 确认 `only_group` 没把私聊场景关掉
 
 **LLM 死活不调用 tool**
 - 确认模型支持 function calling（DeepSeek-R1、Gemini 2.0 thinking 等不支持）
@@ -331,8 +303,8 @@ astrbot_plugin_litepoke/
 ├── metadata.yaml        # 插件元数据
 ├── _conf_schema.json    # 配置 schema
 ├── README.md            # 本文件
-├── EMOTION_GUIDE.md     # 表情分类建议
 ├── CHANGELOG.md         # 版本变更记录
+├── tests/               # 单元测试（stdlib unittest，无需安装 AstrBot）
 ├── LICENSE              # AGPL-3.0
 └── .gitignore
 ```
@@ -341,10 +313,13 @@ astrbot_plugin_litepoke/
 
 ```
 data/plugin_data/astrbot_plugin_litepoke/
-└── memes/               # 表情根目录
-    ├── baka/
-    ├── sad/
-    └── ...
+└── poke_log.json        # PokeLog 持久化
+```
+
+测试直接跑标准库 unittest（用桩替换 astrbot 依赖，不需要安装 AstrBot）：
+
+```bash
+python -m unittest discover -s tests
 ```
 
 ---
