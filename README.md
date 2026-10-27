@@ -326,4 +326,6 @@ python -m unittest discover -s tests
 
 ## License
 
-AGPL-3.0
+Copyright (C) 2026 kazamisama
+
+本项目以 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0）发布。

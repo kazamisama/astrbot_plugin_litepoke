@@ -1,3 +1,6 @@
+# Copyright (C) 2026 kazamisama
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """
 轻量智能戳一戳插件（v2）
 

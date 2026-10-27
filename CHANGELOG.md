@@ -38,6 +38,7 @@ litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://k
 ### Docs
 - README 与实现对齐：移除已于 v1.3.16 删除的 persona / `func_tool_manager` / `tool_set` 降级链描述；同步删除表情回退章节、`EMOTION_GUIDE.md` 链接与文件。
 - README 重构：新增「工作原理」总览图；把使用建议（引导 / 平台差异 / 跟戳调优）与行为说明（PokeLog / 被戳回应 / 上下文）拆成两节；补齐 v1.5.0 的 direct 默认行为、AstrBot >= 4.13.0 要求、私聊需 `only_group=false` 等说明。
+- 版权署名隐私化：LICENSE 与 `metadata.yaml` 中的个人名义改为作者名 `kazamisama`，README 补充版权行，`main.py` / 测试文件增加 SPDX 版权头。
 - 合并重复的 `## [v1.1.0]` 标题；版本演进图更新到 v1.4.x；「未发布的计划」移除已由 v1.3.13 实现的 mtime 热加载。
 - 脱敏：本历史条目中的 webchat 用户名示例改为占位名；`EMOTION_GUIDE.md` 中的本机绝对路径随该文件删除一并消失。
 

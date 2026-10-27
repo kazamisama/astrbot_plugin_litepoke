@@ -1,3 +1,6 @@
+# Copyright (C) 2026 kazamisama
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """litepoke 纯逻辑单元测试（stdlib unittest，零依赖）。
 
 运行方式（在插件根目录）：
