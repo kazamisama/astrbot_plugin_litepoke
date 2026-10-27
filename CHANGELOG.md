@@ -33,6 +33,7 @@ litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://k
 - `respond_poked_mode=direct` 不再发表情/face，改为发送新增的 `respond_poked_text`（默认「（戳了你一下）」）；LLM 请求失败时也用同一句兜底。
 
 ### Added
+- 新增 `logo.png`（用力戳头的鲸鱼娘）作为 AstrBot 插件图标，并作为 README 头图。
 - `tests/test_litepoke.py`：stdlib unittest 用例（用桩替换 astrbot 依赖，无需安装 AstrBot），覆盖 PokeLog 读写/裁剪/坏数据、配置读取、戳一戳文本、原始 poke 判定、history 清洗与解析、vibe 概率规则、通知解析、数据目录推导、直发文字回退、非 aiocqhttp 平台拒绝。运行：`python -m unittest discover -s tests`。
 
 ### Docs

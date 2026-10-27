@@ -1,5 +1,9 @@
 # 轻量智能戳一戳（astrbot_plugin_litepoke）
 
+<p align="center">
+  <img src="logo.png" width="240" alt="用力戳头的鲸鱼娘">
+</p>
+
 一个把"戳一戳"能力做轻的 AstrBot 插件：
 
 - **aiocqhttp（QQ）平台**：发送真实的戳一戳通知
@@ -300,6 +304,7 @@ LLM 请求链抛错时改为直发 respond_poked_text
 ```
 astrbot_plugin_litepoke/
 ├── main.py              # 全部逻辑，单文件
+├── logo.png             # 插件图标（AstrBot 自动识别）
 ├── metadata.yaml        # 插件元数据
 ├── _conf_schema.json    # 配置 schema
 ├── README.md            # 本文件
