@@ -2,6 +2,16 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.5.1] - 2026-10-28
+
+### Changed
+- 配置 schema 按功能拆成 8 个 `object` 分组（基础作用域 / LLM 主动戳 / 普通消息引导 / bot 被戳回应 / 群内跟戳 / 群氛围决策 / PokeLog 统计 / 诊断），AstrBot 配置页按这 8 个功能分组显示。
+- 插件内部仍按扁平键读取配置：启动时展开分组；旧版扁平配置文件在 AstrBot 读取配置前自动迁移，原文件备份为 `..._config.json.legacy.bak`。
+- `metadata.yaml` version：v1.5.0 → v1.5.1
+
+### Added
+- 配置展开与旧配置迁移的单元测试（`ConfigFlattenTests` / `LegacyConfigMigrationTests`），并校验 `_conf_schema.json` 分组与代码中的 `_CONFIG_GROUPS` 一致。
+
 ## [v1.5.0] - 2026-10-27
 
 一次以“完备性与冗余”为核心的审计重构：修掉数据丢失与生命周期泄漏，删掉死代码与重复样板，补上此前缺失的单元测试，并移除不再需要的跨平台表情回退。

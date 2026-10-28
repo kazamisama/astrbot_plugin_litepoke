@@ -62,7 +62,7 @@ PokeLog 运行时数据保存在 `data/plugin_data/astrbot_plugin_litepoke/poke_
 
 ## 配置项
 
-所有配置都在 AstrBot WebUI 的插件配置页里可调（首次启动后才会显示）。WebUI 里会按下方功能顺序展示；配置名保持不变，只调整顺序和说明前缀，兼容旧配置。
+所有配置都在 AstrBot WebUI 的插件配置页里可调（首次启动后才会显示）。WebUI 会把配置按下面的功能拆成 8 个分组框；配置键名保持不变，插件内部仍按扁平键读取。升级时旧版扁平配置会在插件加载前自动迁移到分组结构，原文件备份为 `..._config.json.legacy.bak`。
 
 ### 基础作用域
 

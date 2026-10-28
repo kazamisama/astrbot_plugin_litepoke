@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import sys
 import time
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
@@ -30,9 +31,13 @@ from astrbot.api.event import filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 try:
-    from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+    from astrbot.core.utils.astrbot_path import (
+        get_astrbot_config_path,
+        get_astrbot_plugin_data_path,
+    )
 except ImportError:  # 兼容没有该工具函数的旧版 AstrBot
     get_astrbot_plugin_data_path = None
+    get_astrbot_config_path = None
 try:
     from astrbot.core.agent.message import TextPart
 except ImportError:  # 兼容无 TextPart 的旧版 AstrBot
@@ -49,6 +54,129 @@ _RAW_POKE_MARKERS = {"[poke:poke]", "[componenttype.poke]", "[poke]"}
 
 # PokeLog 持久化格式版本。旧版本 JSON 没有该字段，加载时会按 v0 兼容。
 POKE_LOG_SCHEMA_VERSION = 1
+
+# _conf_schema.json 的功能分组 → 叶键。
+# WebUI 按这些 object 组渲染成分组框；插件内部仍然按扁平键读取，
+# 因此这里同时负责把升级前的扁平配置迁移到分组结构。
+_CONFIG_GROUPS: dict[str, tuple[str, ...]] = {
+    "basic_settings": ("only_group",),
+    "poke_settings": ("poke_max_times", "poke_interval"),
+    "guide_settings": ("trigger_keywords", "guide_cd", "guide_prompt"),
+    "bot_poked_settings": (
+        "respond_poked_enabled",
+        "respond_poked_mode",
+        "respond_poked_text",
+        "respond_poked_prob",
+        "respond_poked_cd",
+        "respond_poked_write_context",
+        "respond_poked_prompt",
+    ),
+    "follow_settings": (
+        "follow_enabled",
+        "follow_prob",
+        "follow_cd",
+        "follow_trace_inject_enabled",
+        "follow_trace_ttl",
+    ),
+    "vibe_settings": (
+        "vibe_window",
+        "vibe_active_threshold",
+        "vibe_quiet_threshold",
+        "vibe_max_in_window",
+    ),
+    "poke_log_settings": (
+        "poke_log_persist",
+        "poke_log_path",
+        "poke_log_window",
+        "poke_log_daily_keep_days",
+        "poke_log_save_interval",
+        "poke_log_inject_enabled",
+    ),
+    "diagnostics_settings": ("debug_diagnostics",),
+}
+_LEGACY_CONFIG_KEYS = frozenset(
+    key for keys in _CONFIG_GROUPS.values() for key in keys
+)
+
+
+def _flatten_config(raw: Any) -> dict[str, Any]:
+    """把分组配置展开为扁平键；旧版顶层扁平键优先，保证升级不丢值。"""
+    flat: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return flat
+    for group in _CONFIG_GROUPS:
+        nested = raw.get(group)
+        if isinstance(nested, dict):
+            for key, value in nested.items():
+                flat.setdefault(key, value)
+    for key, value in raw.items():
+        if key not in _CONFIG_GROUPS:
+            flat[key] = value
+    return flat
+
+
+def _migrate_legacy_config_file(path: Path) -> bool:
+    """把旧版扁平插件配置改写成 _conf_schema.json 的分组结构。
+
+    只在配置文件仍含旧版顶层键时动手；写前保留 .legacy.bak，写盘走临时文件替换。
+    返回 True 表示确实做了迁移。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if not any(key in data for key in _LEGACY_CONFIG_KEYS):
+        return False
+
+    legacy = {key: data[key] for key in _LEGACY_CONFIG_KEYS if key in data}
+    migrated = {
+        key: value for key, value in data.items() if key not in _LEGACY_CONFIG_KEYS
+    }
+    for group, keys in _CONFIG_GROUPS.items():
+        nested = migrated.get(group)
+        if not isinstance(nested, dict):
+            nested = {}
+        for key in keys:
+            if key in legacy and key not in nested:
+                nested[key] = legacy[key]
+        if nested:
+            migrated[group] = nested
+
+    backup = path.with_name(f"{path.name}.legacy.bak")
+    tmp = path.with_name(f"{path.name}.migrating")
+    try:
+        backup.write_bytes(path.read_bytes())
+        tmp.write_text(
+            json.dumps(migrated, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError as e:
+        logger.warning(f"[litepoke] 旧配置迁移失败（将使用默认值）: {e}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+    logger.info(f"[litepoke] 旧版扁平配置已迁移到分组结构，备份: {backup}")
+    return True
+
+
+def _maybe_migrate_legacy_config() -> None:
+    """AstrBot 加载插件模块时（早于 AstrBotConfig 读取）迁移旧扁平配置。"""
+    if "astrbot.core.star.star_manager" not in sys.modules:
+        return  # 单元测试 / 普通导入不碰真实配置
+    if get_astrbot_config_path is None:
+        return
+    try:
+        plugin_name = Path(__file__).resolve().parent.name
+        config_path = Path(get_astrbot_config_path()) / f"{plugin_name}_config.json"
+        _migrate_legacy_config_file(config_path)
+    except Exception as e:
+        logger.debug(f"[litepoke] 检查旧配置迁移失败: {e}")
 
 
 @dataclass
@@ -193,7 +321,8 @@ class PokeLog:
 class LitePokePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
-        self.cfg = config
+        # 配置 schema 按功能分组；内部统一用扁平键读取。
+        self.cfg = _flatten_config(config)
 
         # 跟戳/被戳响应按群隔离，互不共享 CD；工具戳本身不做 CD。
         self._last_follow_poke: dict[str, float] = {}
@@ -1578,3 +1707,8 @@ class LitePokePlugin(Star):
         self._last_follow_poke.clear()
         self._last_respond_poked.clear()
         logger.info("[litepoke] 插件已卸载，guide/vibe/PokeLog 状态已清空")
+
+
+# 插件模块导入发生在星管理创建 AstrBotConfig 之前，借这个时机把旧版扁平配置
+# 迁移成新分组结构；测试或普通导入时上面的守卫会直接跳过。
+_maybe_migrate_legacy_config()

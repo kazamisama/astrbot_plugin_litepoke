@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -214,6 +215,94 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(plugin._cfg_int("num", 1, min_value=1, max_value=3), 3)
         plugin = make_plugin(num=0)
         self.assertEqual(plugin._cfg_int("num", 1, min_value=1, max_value=3), 1)
+
+
+class ConfigFlattenTests(unittest.TestCase):
+    def test_grouped_values_flatten(self):
+        flat = main._flatten_config(
+            {
+                "basic_settings": {"only_group": False},
+                "follow_settings": {"follow_prob": 0.3},
+                "poke_log_settings": {"poke_log_persist": False},
+            }
+        )
+        self.assertFalse(flat["only_group"])
+        self.assertEqual(flat["follow_prob"], 0.3)
+        self.assertFalse(flat["poke_log_persist"])
+        self.assertNotIn("basic_settings", flat)
+
+    def test_top_level_legacy_value_wins(self):
+        flat = main._flatten_config(
+            {"only_group": True, "basic_settings": {"only_group": False}}
+        )
+        self.assertTrue(flat["only_group"])
+
+    def test_plugin_reads_grouped_config(self):
+        plugin = make_plugin(basic_settings={"only_group": False})
+        self.assertFalse(plugin.cfg["only_group"])
+
+    def test_flatten_handles_non_dict(self):
+        self.assertEqual(main._flatten_config(None), {})
+        self.assertEqual(main._flatten_config("oops"), {})
+
+    def test_schema_groups_match_code_groups(self):
+        schema = json.loads(
+            (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(schema), set(main._CONFIG_GROUPS))
+        for group, keys in main._CONFIG_GROUPS.items():
+            self.assertEqual(schema[group]["type"], "object")
+            self.assertEqual(set(schema[group]["items"]), set(keys))
+            for key in keys:
+                self.assertIn("default", schema[group]["items"][key])
+
+
+class LegacyConfigMigrationTests(unittest.TestCase):
+    def test_migrates_flat_config_to_groups(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "astrbot_plugin_litepoke_config.json"
+            old = {
+                "only_group": False,
+                "trigger_keywords": ["笨蛋"],
+                "respond_poked_mode": "llm",
+                "guide_prompt": "custom prompt",
+                "future_key": 1,
+            }
+            path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+
+            self.assertTrue(main._migrate_legacy_config_file(path))
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("only_group", data)
+            self.assertFalse(data["basic_settings"]["only_group"])
+            self.assertEqual(data["guide_settings"]["trigger_keywords"], ["笨蛋"])
+            self.assertEqual(data["guide_settings"]["guide_prompt"], "custom prompt")
+            self.assertEqual(
+                data["bot_poked_settings"]["respond_poked_mode"], "llm"
+            )
+            self.assertEqual(data["future_key"], 1)
+
+            backup = path.with_name(path.name + ".legacy.bak")
+            self.assertTrue(backup.exists())
+            old_backup = json.loads(backup.read_text(encoding="utf-8"))
+            self.assertFalse(old_backup["only_group"])
+            self.assertFalse(main._migrate_legacy_config_file(path))
+
+    def test_keeps_newer_group_value_on_conflict(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "astrbot_plugin_litepoke_config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "only_group": False,
+                        "basic_settings": {"only_group": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(main._migrate_legacy_config_file(path))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(data["basic_settings"]["only_group"])
 
 
 class PokeEventTextTests(unittest.TestCase):
