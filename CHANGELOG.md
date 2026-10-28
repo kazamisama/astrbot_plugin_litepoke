@@ -2,6 +2,11 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.1] - 2026-10-28
+
+### Changed
+- 发布版本号更新为 v1.6.1：AstrBot Cloud 已存在 v1.6.0 的版本记录，已删除或撤回的版本号也不能重复使用。代码与 v1.6.0 相同。
+
 ## [v1.6.0] - 2026-10-28
 
 ### Removed（breaking）
