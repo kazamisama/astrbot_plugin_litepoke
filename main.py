@@ -42,8 +42,6 @@ try:
     from astrbot.core.agent.message import TextPart
 except ImportError:  # 兼容无 TextPart 的旧版 AstrBot
     TextPart = None
-from astrbot.core.message.components import Plain
-from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
@@ -64,8 +62,6 @@ _CONFIG_GROUPS: dict[str, tuple[str, ...]] = {
     "guide_settings": ("trigger_keywords", "guide_cd", "guide_prompt"),
     "bot_poked_settings": (
         "respond_poked_enabled",
-        "respond_poked_mode",
-        "respond_poked_text",
         "respond_poked_prob",
         "respond_poked_cd",
         "respond_poked_write_context",
@@ -87,9 +83,9 @@ _CONFIG_GROUPS: dict[str, tuple[str, ...]] = {
     "poke_log_settings": (
         "poke_log_persist",
         "poke_log_path",
+        "poke_log_save_interval",
         "poke_log_window",
         "poke_log_daily_keep_days",
-        "poke_log_save_interval",
         "poke_log_inject_enabled",
     ),
     "diagnostics_settings": ("debug_diagnostics",),
@@ -972,20 +968,6 @@ class LitePokePlugin(Star):
         if time.time() - self._poke_log.last_saved >= interval:
             self._save_poke_log()
 
-    # ===================== 内部：直发文字 =====================
-
-    async def _send_direct_text(self, event: Any) -> str:
-        """bot 被戳且 mode=direct 时直接发一句文字，保证回应可见。"""
-        text = (self.cfg.get("respond_poked_text", "（戳了你一下）") or "").strip()
-        if not text:
-            return ""
-        try:
-            await event.send(MessageChain([Plain(text)]))
-            return text
-        except Exception as e:
-            logger.warning(f"[litepoke] 直发文字失败: {e}")
-            return ""
-
     # ===================== 核心：LLM Tool =====================
 
     @filter.llm_tool(name="poke_user")
@@ -1275,7 +1257,7 @@ class LitePokePlugin(Star):
         """监听 aiocqhttp 戳一戳事件。
 
         支持两类场景：
-        - bot 被戳：群聊/私聊都可写入上下文并主动回应（direct 直发文字 / llm 调 LLM；私聊受 only_group 限制）。
+        - bot 被戳：群聊/私聊都可写入上下文并主动发起 LLM 回应（私聊受 only_group 限制）。
         - 概率跟戳：仅群聊中别人戳别人时生效。
         """
         if not isinstance(event, AiocqhttpMessageEvent):
@@ -1390,8 +1372,7 @@ class LitePokePlugin(Star):
     ) -> Any | None:
         """处理 bot 被戳：记录统计、写入上下文，并按配置返回一次 LLM 请求。
 
-        返回 None 表示本轮不需要/无法发起 LLM 请求（已计数并写入上下文，
-        或已直接发送文字）。
+        返回 None 表示本轮不回应或无法发起 LLM 请求（已计数并写入上下文）。
         """
         now = time.time()
         self._poke_log.record(str(user_id), now)
@@ -1484,25 +1465,11 @@ class LitePokePlugin(Star):
             )
             return None
 
-        # 非 CD：默认直发一句文字，避免 notice 事件重投递后只走插件监听、没有触发 LLM。
-        # 非 direct 模式统一走原生 LLM 请求链；replay 仅作为 llm 的兼容别名。
-        respond_mode = str(
-            self.cfg.get("respond_poked_mode", "direct") or "direct"
-        ).strip().lower()
-        # CD 在发起响应前就记下：即使后续 LLM 链路失败或文字发送失败，也按“已响应”计，
+        # CD 在发起响应前就记下：即使后续 LLM 链路失败，也按“已响应”计，
         # 避免失败重试把群刷屏。这是刻意的“防刷屏优先”取舍。
         self._last_respond_poked[scope] = time.time()
 
-        if respond_mode not in {"replay", "llm"}:
-            result = await self._send_direct_text(event)
-            event.stop_event()
-            logger.info(
-                f"[litepoke] 主动回应被戳：scope={scope} sender={user_id} "
-                f"-> 直发文字: {result or '失败'}"
-            )
-            return None
-
-        # llm/replay 模式：直接走 AstrBot 原生 LLM 请求链。
+        # 被戳回应统一走 AstrBot 原生 LLM 请求链，不再直发固定文字。
         try:
             prompt_template = self.cfg.get(
                 "respond_poked_prompt",
@@ -1524,10 +1491,6 @@ class LitePokePlugin(Star):
             return event.request_llm(prompt=llm_prompt, conversation=conversation)
         except Exception as e:
             logger.warning(f"[litepoke] 主动回应被戳 LLM 响应失败: {e}")
-            result = await self._send_direct_text(event)
-            if result:
-                event.stop_event()
-                logger.info(f"[litepoke] LLM 响应失败，已直发文字: {result}")
             return None
 
     async def _handle_follow_poke(

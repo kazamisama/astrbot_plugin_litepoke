@@ -11,7 +11,7 @@
 - **LLM 自主判断**：注册 `poke_user` 工具，模型自行决定何时戳
 - **场景引导钩子**：检测关键词 → 以临时 TextPart 注入提示 → 让 LLM 考虑调用
 - **群内跟戳**（v1.1+）：监听群内戳一戳事件，按概率跟戳"别人戳别人"，基于滑动窗口的轻量群氛围决策
-- **被戳回应**（v1.3+）：bot 被戳时按 `respond_poked_mode` 主动回应（`direct` 直发文字 / `llm` 走 AstrBot 原生 LLM 请求链）
+- **被戳回应**（v1.3+）：bot 被戳时按概率 / 间隔主动发起一次 LLM 回应，让模型按人设处理
 
 代码刻意保持单文件、零依赖、易读易改。
 
@@ -41,14 +41,14 @@ LLM 决定戳人 ──> poke_user 工具（aiocqhttp 发真实戳一戳；其�
    └─ 关键词引导（命中 trigger_keywords 且过 guide_cd）
 群内消息 ──> on_group_message：维护每个群的滑动窗口（vibe）
 戳一戳事件 ──> on_group_poke：
-   ├─ bot 被戳 ──> PokeLog + 写入上下文 + 回应（direct 直发 / llm 请求）
+   ├─ bot 被戳 ──> PokeLog + 写入上下文 + 发起 LLM 回应
    ├─ 别人戳别人 ──> 按 vibe 调整后的概率跟戳
    └─ bot 自己发出的戳 ──> 清理历史中残留的原始 poke 记录
 ```
 
 - 注入给 LLM 的临时提示统一走 `extra_user_content_parts` + `mark_as_temp()`，不写入会话历史，也不破坏 system prompt 前缀缓存。
 - 跟戳（`follow_*`）和群氛围（`vibe_*`）是纯规则动作，不触发 LLM；被戳回应是唯一会主动发起 LLM 请求的路径。
-- 主动回应默认 `respond_poked_mode=direct`：直接发一句文字，不依赖 LLM 是否可用；需要模型参与时改成 `llm`。
+- 主动回应只走 LLM：bot 被戳且命中概率 / CD 后发起一次 LLM 请求；不再发送固定的直发文字。
 
 ---
 
@@ -64,7 +64,7 @@ PokeLog 运行时数据保存在 `data/plugin_data/astrbot_plugin_litepoke/poke_
 
 所有配置都在 AstrBot WebUI 的插件配置页里可调（首次启动后才会显示）。WebUI 会把配置按下面的功能拆成 8 个分组框；配置键名保持不变，插件内部仍按扁平键读取。升级时旧版扁平配置会在插件加载前自动迁移到分组结构，原文件备份为 `..._config.json.legacy.bak`。
 
-### 基础作用域
+### 基础
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
@@ -77,25 +77,23 @@ PokeLog 运行时数据保存在 `data/plugin_data/astrbot_plugin_litepoke/poke_
 | `poke_max_times` | 3 | aiocqhttp 下 LLM 传入的 times 上限 |
 | `poke_interval` | 0.5 | 多次戳时每次间隔（秒） |
 
-### 普通消息引导
+### 关键词引导
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `trigger_keywords` | `["笨蛋","人机","机器人","bot","傻"]` | 命中即注入引导提示的关键词 |
 | `guide_cd` | 30 | 同一会话内引导提示最小间隔（秒） |
-| `guide_prompt` | 见配置 | 普通消息命中关键词时以临时 TextPart 注入的轻量引导；不处理 bot 被戳事件 |
+| `guide_prompt` | 见配置 | 命中关键词时以临时 TextPart 注入的轻量引导；不处理 bot 被戳事件 |
 
-### bot 被戳回应
+### 被戳回应
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `respond_poked_enabled` | true | 主动回应被戳开关 |
-| `respond_poked_mode` | `direct` | `direct`=直接发一句话，最稳定；`llm`/`replay`=走 AstrBot 原生 LLM 请求链 |
-| `respond_poked_text` | `（戳了你一下）` | `direct` 模式发送的文字；LLM 请求失败时也用它兜底 |
 | `respond_poked_prob` | 1.0 | 被戳响应概率（0-1） |
 | `respond_poked_cd` | 10 | 被戳响应 CD（秒）|
 | `respond_poked_write_context` | true | 被戳 notice 是否作为纯文本 user 消息写入官方 conversation；CD 内只写入不即时回应 |
-| `respond_poked_prompt` | 见配置 | 被戳响应 prompt 模板；`llm`/`replay` 模式下使用 `{poke_event}` 占位符 |
+| `respond_poked_prompt` | 见配置 | 被戳响应 prompt 模板；使用 `{poke_event}` 占位符 |
 
 ### 群内跟戳
 
@@ -107,7 +105,7 @@ PokeLog 运行时数据保存在 `data/plugin_data/astrbot_plugin_litepoke/poke_
 | `follow_trace_inject_enabled` | true | 是否把自动跟戳成功的概率命中原因短期注入给下一次 LLM 请求，用于解释“为什么戳他” |
 | `follow_trace_ttl` | 60 | 跟戳解释缓存保留秒数；过期未被消费会丢弃，只保存在内存 |
 
-### 群氛围决策
+### 跟戳氛围
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
@@ -116,15 +114,15 @@ PokeLog 运行时数据保存在 `data/plugin_data/astrbot_plugin_litepoke/poke_
 | `vibe_quiet_threshold` | 1 | 窗口内消息数 < 此值算群冷清，跟戳概率 ×0.3 |
 | `vibe_max_in_window` | 1 | 窗口内最多跟戳几次 |
 
-### PokeLog 统计
+### 记录与统计
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `poke_log_persist` | true | 是否持久化 PokeLog 到 JSON |
 | `poke_log_path` | 空 | PokeLog JSON 路径；留空用自带 |
+| `poke_log_save_interval` | 60 | 写盘间隔秒数 |
 | `poke_log_window` | 60 | 短期窗口秒数（recent 队列） |
 | `poke_log_daily_keep_days` | 7 | 日累计保留天数 |
-| `poke_log_save_interval` | 60 | 写盘间隔秒数 |
 | `poke_log_inject_enabled` | false | 是否把 PokeLog 统计以临时 TextPart 注入，默认关闭 |
 
 ### 诊断
@@ -227,7 +225,7 @@ data/plugin_data/astrbot_plugin_litepoke/poke_log.json
 
 ### 5. bot 被戳主动回应（v1.3+）
 
-litepoke 自 v1.3 起在 bot 被戳时会**主动**回应：累积 PokeLog → 按 `respond_poked_mode` 发出可见消息（`direct` 直发 `respond_poked_text`，`llm`/`replay` 触发一次 LLM 调用）。早期版本（≤ v1.2）只静默累积 PokeLog，**不会**主动回应被戳；v1.5 起默认走 `direct`，保证被戳一定有回应，且不依赖 LLM 是否可用。
+litepoke 自 v1.3 起在 bot 被戳时会**主动**回应：累积 PokeLog → 按 `respond_poked_prob` / `respond_poked_cd` 决定是否触发一次 LLM 调用。v1.6 起去掉 direct 直发模式，统一走 LLM；模型不可用时不会发出固定文字兜底。
 
 **触发流程**：
 
@@ -239,13 +237,12 @@ on_group_poke 触发
    ↓ _build_poke_event_text 构造戳一戳事件文本
    ↓ 可选：写入官方 conversation（respond_poked_write_context；不受 respond_poked_cd 影响）
    ↓ 检查 respond_poked_enabled
-   ↓ 检查 respond_poked_cd（direct 文字与 LLM 响应共用，防刷屏）
+   ↓ 检查 respond_poked_cd（防刷屏）
    ↓ 检查 respond_poked_prob（概率）
-   ↓ respond_poked_mode=direct（默认）：直发 respond_poked_text → event.stop_event()
-   ↓ respond_poked_mode=llm/replay：获取官方 conversation → event.request_llm(prompt, conversation) → yield
+   ↓ 获取官方 conversation → event.request_llm(prompt, conversation) → yield
    ↓
-LLM 结合 conversation 中的 poke_event（或 prompt 内联的 poke_event）与人格决定回应；
-LLM 请求链抛错时改为直发 respond_poked_text
+LLM 结合 conversation 中的 poke_event（或 prompt 内联的 poke_event）与人设决定回应；
+LLM 请求链抛错时只记录 warning，不再直发固定文字
 ```
 
 这里不使用 `guide_prompt`；`guide_prompt` 只用于普通消息命中关键词时的轻量工具提醒，被戳事件由 `respond_poked_prompt` 独立控制。
@@ -271,17 +268,13 @@ LLM 请求链抛错时改为直发 respond_poked_text
 - 跟戳（v1.1+）是**纯规则**动作，不触发 LLM，**不污染**上下文
 - PokeLog（v1.2+）通过 `on_llm_request` 钩子以临时 TextPart **延迟注入**统计块，让 LLM 后续响应时能感知被戳统计
 - 提示词注入（v1.4.9+）统一走 `extra_user_content_parts` + `mark_as_temp()`：跟戳解释 / PokeLog / 关键词引导只发给 LLM，不写入会话历史，也不污染 system_prompt 前缀缓存
-- **主动回应**（v1.3+）：bot 被戳时按 `respond_poked_mode` 回应；`llm`/`replay` 触发一次 LLM 调用，`direct` 直接发文字
+- **主动回应**（v1.3+）：bot 被戳时按概率 / CD 触发一次 LLM 调用
 - **写入上下文**（v1.3.4+）：开启 `respond_poked_write_context` 后，bot 被戳的 notice 会作为一条纯文本 `user` 消息写入官方 conversation，后续普通对话也能自然感知这次戳一戳事件
-- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。`llm`/`replay` 模式下会优先传入官方 conversation；由于当前戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则把 `poke_event` 直接内联进 prompt 发起 LLM 请求；`respond_poked_mode=direct` 或 LLM 请求链抛错时改为直发 `respond_poked_text`
+- 为避免 OpenAI 兼容接口的工具调用历史配对问题，litepoke 不会写入 `tool` / `tool_calls`。回应会优先传入官方 conversation；由于戳一戳事件已写入 conversation，prompt 只引用“上文最新的戳一戳事件”，避免同一 `poke_text` 重复出现。若 conversation 获取失败，则把 `poke_event` 直接内联进 prompt 发起 LLM 请求。
 
 ---
 
 ## 故障排查
-
-**插件加载失败：cannot import name 'MessageChain'**
-- 这是导入路径问题。`MessageChain` 在 `astrbot.core.message.message_event_result`，不在 `components`。
-- 本插件已修正。如果自定义时报这个错，对照 `main.py` 顶部的 import。
 
 **调用 tool 后没收到任何消息**
 - 确认当前平台是 aiocqhttp：其他平台没有戳一戳动作，工具会直接返回失败提示

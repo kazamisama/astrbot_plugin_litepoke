@@ -256,6 +256,14 @@ class ConfigFlattenTests(unittest.TestCase):
             for key in keys:
                 self.assertIn("default", schema[group]["items"][key])
 
+    def test_schema_has_no_direct_mode_keys(self):
+        schema = json.loads(
+            (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
+        )
+        items = schema["bot_poked_settings"]["items"]
+        self.assertNotIn("respond_poked_mode", items)
+        self.assertNotIn("respond_poked_text", items)
+
 
 class LegacyConfigMigrationTests(unittest.TestCase):
     def test_migrates_flat_config_to_groups(self):
@@ -264,7 +272,7 @@ class LegacyConfigMigrationTests(unittest.TestCase):
             old = {
                 "only_group": False,
                 "trigger_keywords": ["笨蛋"],
-                "respond_poked_mode": "llm",
+                "respond_poked_prob": 0.5,
                 "guide_prompt": "custom prompt",
                 "future_key": 1,
             }
@@ -277,9 +285,7 @@ class LegacyConfigMigrationTests(unittest.TestCase):
             self.assertFalse(data["basic_settings"]["only_group"])
             self.assertEqual(data["guide_settings"]["trigger_keywords"], ["笨蛋"])
             self.assertEqual(data["guide_settings"]["guide_prompt"], "custom prompt")
-            self.assertEqual(
-                data["bot_poked_settings"]["respond_poked_mode"], "llm"
-            )
+            self.assertEqual(data["bot_poked_settings"]["respond_poked_prob"], 0.5)
             self.assertEqual(data["future_key"], 1)
 
             backup = path.with_name(path.name + ".legacy.bak")
@@ -562,42 +568,36 @@ class PluginDataDirTests(unittest.TestCase):
         self.assertIsNone(main.LitePokePlugin._plugin_data_dir())
 
 
-class _RecordingEvent:
-    """最小事件桩：记录 send 的 chain，可模拟发送失败。"""
+class BotPokedResponseTests(unittest.IsolatedAsyncioTestCase):
+    class _Event:
+        def __init__(self):
+            self.requests = []
 
-    def __init__(self, fail: bool = False):
-        self.sent = []
-        self.fail = fail
+        def get_sender_name(self):
+            return "alice"
 
-    async def send(self, chain):
-        if self.fail:
-            raise RuntimeError("send failed")
-        self.sent.append(chain)
+        def request_llm(self, **kwargs):
+            self.requests.append(kwargs)
+            return "llm-request"
 
+    async def test_uses_llm_request(self):
+        plugin = make_plugin(
+            respond_poked_write_context=False,
+            respond_poked_cd=0,
+            respond_poked_prob=1.0,
+        )
 
-class DirectTextTests(unittest.IsolatedAsyncioTestCase):
-    async def test_sends_default_text(self):
-        plugin = make_plugin()
-        event = _RecordingEvent()
-        self.assertEqual(await plugin._send_direct_text(event), "（戳了你一下）")
-        self.assertEqual(len(event.sent), 1)
-        self.assertEqual(event.sent[0].chain[0].text, "（戳了你一下）")
+        async def no_cleanup(*_args, **_kwargs):
+            return None
 
-    async def test_sends_configured_text(self):
-        plugin = make_plugin(respond_poked_text="哼")
-        event = _RecordingEvent()
-        self.assertEqual(await plugin._send_direct_text(event), "哼")
-
-    async def test_empty_text_sends_nothing(self):
-        plugin = make_plugin(respond_poked_text="   ")
-        event = _RecordingEvent()
-        self.assertEqual(await plugin._send_direct_text(event), "")
-        self.assertEqual(event.sent, [])
-
-    async def test_send_failure_returns_empty(self):
-        plugin = make_plugin()
-        event = _RecordingEvent(fail=True)
-        self.assertEqual(await plugin._send_direct_text(event), "")
+        plugin._delayed_cleanup_poke_history = no_cleanup
+        event = self._Event()
+        result = await plugin._handle_bot_poked(
+            event, user_id="123", target_id="bot", scope="g1"
+        )
+        self.assertEqual(result, "llm-request")
+        self.assertEqual(len(event.requests), 1)
+        self.assertIn("[戳一戳事件]", event.requests[0]["prompt"])
 
 
 class PokeUserPlatformTests(unittest.IsolatedAsyncioTestCase):

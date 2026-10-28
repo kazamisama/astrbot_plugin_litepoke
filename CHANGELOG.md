@@ -2,6 +2,16 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.0] - 2026-10-28
+
+### Removed（breaking）
+- 移除 bot 被戳的直发模式：删除 `respond_poked_mode` 与 `respond_poked_text`，不再发送固定文字，也不在 LLM 请求失败时发送兜底文本；被戳回应统一走 AstrBot 原生 LLM 请求链。
+- 旧配置中的这两个键会被 AstrBot 在读取配置时自动忽略。
+
+### Changed
+- 重写配置 schema 的描述与提示，并调整分组内字段顺序：分组标题改为「基础 / 关键词引导 / 被戳回应 / 跟戳氛围 / 记录与统计」等更直观的名称；`respond_poked_prompt` 改为多行文本输入。
+- `metadata.yaml` version：v1.5.1 → v1.6.0
+
 ## [v1.5.1] - 2026-10-28
 
 ### Changed
