@@ -314,10 +314,20 @@ data/plugin_data/astrbot_plugin_litepoke/
 └── poke_log.json        # PokeLog 持久化
 ```
 
-测试直接跑标准库 unittest（用桩替换 astrbot 依赖，不需要安装 AstrBot）：
+---
+
+## 开发与测试
+
+测试用标准库 `unittest`，`tests/test_litepoke.py` 通过桩隔离 AstrBot 依赖，不需要安装 AstrBot；在仓库根目录运行：
 
 ```bash
-python -m unittest discover -s tests
+python -m unittest discover -s tests -v
+```
+
+提交前再跑一次编译检查：
+
+```bash
+python -m py_compile main.py
 ```
 
 ---

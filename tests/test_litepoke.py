@@ -217,6 +217,20 @@ class ConfigNormalizationTests(unittest.TestCase):
         self.assertNotIn("debug_diagnostics", plugin.cfg)
         self.assertNotIn("follow_enabled", plugin.cfg)
 
+    def test_integer_schema_keys_normalize_to_int(self):
+        schema = json.loads(
+            (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
+        )
+        int_keys = [
+            key
+            for group in schema.values()
+            for key, item in group["items"].items()
+            if item.get("type") == "int"
+        ]
+        plugin = make_plugin(**{key: 12.9 for key in int_keys})
+        for key in int_keys:
+            self.assertIsInstance(plugin.cfg[key], int)
+
 
 class ConfigFlattenTests(unittest.TestCase):
     def test_grouped_values_flatten(self):

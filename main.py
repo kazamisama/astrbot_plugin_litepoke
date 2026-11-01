@@ -409,7 +409,7 @@ class LitePokePlugin(Star):
         self.cfg["poke_interval"] = self._cfg_float(
             "poke_interval", 0.5, min_value=0
         )
-        self.cfg["guide_cd"] = self._cfg_float("guide_cd", 30, min_value=0)
+        self.cfg["guide_cd"] = self._cfg_int("guide_cd", 30, min_value=0)
         self.cfg["respond_poked_prob"] = self._cfg_float(
             "respond_poked_prob", 1.0, min_value=0.0, max_value=1.0
         )
@@ -433,7 +433,7 @@ class LitePokePlugin(Star):
         self.cfg["vibe_max_in_window"] = self._cfg_int(
             "vibe_max_in_window", 1, min_value=1
         )
-        self.cfg["poke_log_save_interval"] = self._cfg_float(
+        self.cfg["poke_log_save_interval"] = self._cfg_int(
             "poke_log_save_interval", 60, min_value=1
         )
         self.cfg["poke_log_window"] = self._cfg_int(
@@ -1181,6 +1181,8 @@ class LitePokePlugin(Star):
             append_extra_part(self._build_poke_log_block())
 
         # === 通道 3：关键词引导 ===
+        # 直接构造插件（测试/非 AstrBot 环境）不会补 schema 默认值；
+        # 生产环境由 AstrBot 提供默认关键词，这里仅保留空列表兜底。
         keywords = self.cfg.get("trigger_keywords", []) or []
         if not keywords:
             return

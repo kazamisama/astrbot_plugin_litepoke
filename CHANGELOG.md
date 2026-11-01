@@ -2,6 +2,20 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.3] - 2026-11-01
+
+### Fixed
+- `guide_cd` 与 `poke_log_save_interval` 在初始化时改用整数归一化，与 `_conf_schema.json` 的 `int` 类型一致；小数输入按整数截断。
+
+### Changed
+- README 增加「开发与测试」一节，测试与编译检查命令从「文件结构」移入该节。
+- 说明 `trigger_keywords` 在直接构造插件时使用空列表兜底；生产环境由 AstrBot 按 schema 补默认值。
+- 版本演进图补到 v1.6.x，并注明 v1.6 移除 direct 直发。
+- `metadata.yaml` version：v1.6.2 → v1.6.3
+
+### Tests
+- 新增 schema 整数键归一化测试，确保初始化后保持 `int` 类型。
+
 ## [v1.6.2] - 2026-11-01
 
 ### Changed
@@ -595,15 +609,16 @@ litepoke 正式可用的第一个版本，包含完整的戳一戳自主决策�
 ## 版本演进图
 
 ```
-v0.1.0 ──→ v0.2.0 ──→ v0.3.0 ──→ v1.0.0 ──→ v1.1.0 ──→ v1.2.0 ──→ v1.3.0 ──→ v1.4.x ──→ v1.5.0
-基础功能    跨平台回退   表情包独立   文档完善    跟戳+vibe   PokeLog     主动回应    注入与重构   审计重构
-   │           │           │          │           │           │           │           │           │
-  QQ真戳     meme/face   不再依赖   README      群氛围窗口   统计注入    LLM 响应    temp 注入    测试 + 删除回退
-  +CD       三级降级     meme_mgr   EMOTION     概率调整     原子写盘    上下文写入  单元测试      数据丢失修复
-  +引导     修两bug     自带目录   GUIDE       共享CD       7 天保留    replay 别名 数据丢失修复  direct 默认
+v0.1.0 ──→ v0.2.0 ──→ v0.3.0 ──→ v1.0.0 ──→ v1.1.0 ──→ v1.2.0 ──→ v1.3.0 ──→ v1.4.x ──→ v1.5.0 ──→ v1.6.x
+基础功能    跨平台回退   表情包独立   文档完善    跟戳+vibe   PokeLog     主动回应    注入与重构   审计重构     配置归一化
+   │           │           │          │           │           │           │           │           │           │
+  QQ真戳     meme/face   不再依赖   README      群氛围窗口   统计注入    LLM 响应    temp 注入    测试 + 删除回退  去直发
+  +CD       三级降级     meme_mgr   EMOTION     概率调整     原子写盘    上下文写入  单元测试      数据丢失修复     schema 类型对齐
+  +引导     修两bug     自带目录   GUIDE       共享CD       7 天保留    replay 别名 数据丢失修复  direct 默认      v1.6.3 文档
 ```
 
 > v1.5.0 移除了跨平台表情回退：戳一戳只在 QQ（aiocqhttp）存在，其他平台不再模拟该动作。
+> v1.6.0 移除了 bot 被戳的 direct 直发模式；v1.6.3 将整数配置的归一化类型与 schema 对齐。
 
 ---
 
