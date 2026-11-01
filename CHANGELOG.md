@@ -2,6 +2,17 @@
 
 litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.6.2] - 2026-11-01
+
+### Changed
+- 配置在插件初始化时统一归一化：数值键只转换/夹取一次，bool / str / list / null 类型不合法时回退默认值；事件路径不再重复校验配置。
+- 删除 `_track_task`、`poke_user`、`_handle_bot_poked` 中“理论不可达”的防御分支，以及 `_maybe_prune_group_state` 的冗余空值判断。
+- `_build_poke_event_text` 签名收窄为 `dict`，删除无效类型守卫；清理未使用的测试桩。
+- `metadata.yaml` version：v1.6.1 → v1.6.2
+
+### Tests
+- 新增配置归一化测试，覆盖错误布尔 / 字符串 / 列表 / null 的回退；`vibe_max_in_window` clamp 测试改为在初始化时验证。
+
 ## [v1.6.1] - 2026-10-28
 
 ### Changed

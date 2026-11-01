@@ -94,6 +94,22 @@ _LEGACY_CONFIG_KEYS = frozenset(
     key for keys in _CONFIG_GROUPS.values() for key in keys
 )
 
+# 非数值配置的期望类型；不合法时在初始化阶段丢弃，回退到读取处的默认值。
+_CONFIG_TYPES: dict[str, type] = {
+    "only_group": bool,
+    "trigger_keywords": list,
+    "guide_prompt": str,
+    "respond_poked_enabled": bool,
+    "respond_poked_write_context": bool,
+    "respond_poked_prompt": str,
+    "follow_enabled": bool,
+    "follow_trace_inject_enabled": bool,
+    "poke_log_persist": bool,
+    "poke_log_path": str,
+    "poke_log_inject_enabled": bool,
+    "debug_diagnostics": bool,
+}
+
 
 def _flatten_config(raw: Any) -> dict[str, Any]:
     """把分组配置展开为扁平键；旧版顶层扁平键优先，保证升级不丢值。"""
@@ -319,6 +335,7 @@ class LitePokePlugin(Star):
         super().__init__(context)
         # 配置 schema 按功能分组；内部统一用扁平键读取。
         self.cfg = _flatten_config(config)
+        self._normalize_config()
 
         # 跟戳/被戳响应按群隔离，互不共享 CD；工具戳本身不做 CD。
         self._last_follow_poke: dict[str, float] = {}
@@ -342,7 +359,6 @@ class LitePokePlugin(Star):
         # 后台清理任务引用：不持有引用时 asyncio 可能在完成前回收任务。
         self._bg_tasks: set[asyncio.Task] = set()
 
-        # 启动时从 JSON 恢复 PokeLog
         self._load_poke_log()
 
     @staticmethod
@@ -385,13 +401,68 @@ class LitePokePlugin(Star):
             value = int(default)
         return int(self._clamp(float(value), min_value, max_value))
 
+    def _normalize_config(self) -> None:
+        """把配置快照收敛成确定类型；之后热路径直接读 self.cfg。"""
+        self.cfg["poke_max_times"] = self._cfg_int(
+            "poke_max_times", 3, min_value=1
+        )
+        self.cfg["poke_interval"] = self._cfg_float(
+            "poke_interval", 0.5, min_value=0
+        )
+        self.cfg["guide_cd"] = self._cfg_float("guide_cd", 30, min_value=0)
+        self.cfg["respond_poked_prob"] = self._cfg_float(
+            "respond_poked_prob", 1.0, min_value=0.0, max_value=1.0
+        )
+        self.cfg["respond_poked_cd"] = self._cfg_float(
+            "respond_poked_cd", 10, min_value=0
+        )
+        self.cfg["follow_prob"] = self._cfg_float(
+            "follow_prob", 0.1, min_value=0.0, max_value=1.0
+        )
+        self.cfg["follow_cd"] = self._cfg_float("follow_cd", 3, min_value=0)
+        self.cfg["follow_trace_ttl"] = self._cfg_int(
+            "follow_trace_ttl", 60, min_value=1
+        )
+        self.cfg["vibe_window"] = self._cfg_int("vibe_window", 60, min_value=1)
+        self.cfg["vibe_active_threshold"] = self._cfg_int(
+            "vibe_active_threshold", 5, min_value=0
+        )
+        self.cfg["vibe_quiet_threshold"] = self._cfg_int(
+            "vibe_quiet_threshold", 1, min_value=0
+        )
+        self.cfg["vibe_max_in_window"] = self._cfg_int(
+            "vibe_max_in_window", 1, min_value=1
+        )
+        self.cfg["poke_log_save_interval"] = self._cfg_float(
+            "poke_log_save_interval", 60, min_value=1
+        )
+        self.cfg["poke_log_window"] = self._cfg_int(
+            "poke_log_window", 60, min_value=1
+        )
+        self.cfg["poke_log_daily_keep_days"] = self._cfg_int(
+            "poke_log_daily_keep_days", 7, min_value=0
+        )
+
+        for key, expected in _CONFIG_TYPES.items():
+            value = self.cfg.get(key)
+            if value is None:
+                self.cfg.pop(key, None)
+                continue
+            if expected is list:
+                valid = isinstance(value, list) and all(
+                    isinstance(item, str) for item in value
+                )
+            else:
+                valid = isinstance(value, expected)
+            if not valid:
+                logger.warning(
+                    f"[litepoke] 配置 {key} 类型不是 {expected.__name__}，使用默认值"
+                )
+                self.cfg.pop(key, None)
+
     def _track_task(self, coro) -> None:
         """把协程挂成后台任务并持有引用，避免任务未完成就被回收。"""
-        try:
-            task = asyncio.ensure_future(coro)
-        except RuntimeError as e:  # 没有运行中的事件循环（理论不可达）
-            logger.warning(f"[litepoke] 无法创建后台任务: {e}")
-            return
+        task = asyncio.ensure_future(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
@@ -410,7 +481,7 @@ class LitePokePlugin(Star):
     # ===================== 内部：戳一戳事件文本构造（移植自 chat_plus；chat_plus 已停用） =====================
 
     @staticmethod
-    def _build_poke_event_text(poke_info: dict | None) -> str:
+    def _build_poke_event_text(poke_info: dict) -> str:
         """构造可注入到 LLM 的戳一戳事件伪消息文本
 
         移植自 astrbot_plugin_group_chat_plus 的 build_persistent_poke_event_text
@@ -420,9 +491,6 @@ class LitePokePlugin(Star):
         注意：sender_name / target_name 都有 "未知用户" 兜底，所以 sender_text /
         target_text 永远非空，这里只需要区分「戳的是 bot」和「戳的是别人」两种输出。
         """
-        if not poke_info or not isinstance(poke_info, dict):
-            return ""
-
         sender_id = str(poke_info.get("sender_id", "") or "")
         sender_name = (
             str(poke_info.get("sender_name", "") or "").strip() or "未知用户"
@@ -828,20 +896,18 @@ class LitePokePlugin(Star):
             return
         self._last_group_state_cleanup = now
 
-        vibe_window = self._cfg_int("vibe_window", 60, min_value=1)
+        vibe_window = self.cfg["vibe_window"]
         for gid in list(self._vibe.keys()):
-            vibe = self._vibe.get(gid)
-            if vibe is None:
-                continue
+            vibe = self._vibe[gid]
             vibe.prune(now, vibe_window)
             if not vibe.recent_msgs and not vibe.recent_pokes:
                 self._vibe.pop(gid, None)
 
         ttl = max(
             300,
-            self._cfg_float("follow_cd", 3, min_value=0),
-            self._cfg_float("respond_poked_cd", 10, min_value=0),
-            self._cfg_float("guide_cd", 30, min_value=0),
+            self.cfg["follow_cd"],
+            self.cfg["respond_poked_cd"],
+            self.cfg["guide_cd"],
         )
         for mapping in (self._last_follow_poke, self._last_respond_poked):
             for gid in [gid for gid, ts in mapping.items() if now - ts > ttl]:
@@ -939,10 +1005,9 @@ class LitePokePlugin(Star):
             return
         try:
             self._poke_log.last_saved = time.time()
-            # 写盘前清理
             now = time.time()
-            window = self._cfg_int("poke_log_window", 60, min_value=1)
-            keep_days = self._cfg_int("poke_log_daily_keep_days", 7, min_value=0)
+            window = self.cfg["poke_log_window"]
+            keep_days = self.cfg["poke_log_daily_keep_days"]
             self._poke_log.prune_recent(now, window)
             self._poke_log.prune_daily(keep_days)
 
@@ -964,7 +1029,7 @@ class LitePokePlugin(Star):
         """间隔写盘：每 poke_log_save_interval 秒写一次（未开启持久化时直接跳过）"""
         if not self.cfg.get("poke_log_persist", True):
             return
-        interval = self._cfg_float("poke_log_save_interval", 60, min_value=1)
+        interval = self.cfg["poke_log_save_interval"]
         if time.time() - self._poke_log.last_saved >= interval:
             self._save_poke_log()
 
@@ -1001,12 +1066,8 @@ class LitePokePlugin(Star):
             return "戳一戳失败：私聊场景未启用戳一戳"
 
         # 自我保护
-        try:
-            self_id = str(event.get_self_id())
-            if user_id == self_id:
-                return "戳一戳失败：不能戳机器人自己"
-        except Exception:
-            pass
+        if user_id == str(event.get_self_id()):
+            return "戳一戳失败：不能戳机器人自己"
 
         # ID 格式校验：aiocqhttp 要求纯数字 QQ 号
         if is_aiocqhttp and not user_id.isdigit():
@@ -1017,14 +1078,14 @@ class LitePokePlugin(Star):
 
         # === 分支 A：aiocqhttp 真戳 ===
         if is_aiocqhttp and group_id:
-            max_times = self._cfg_int("poke_max_times", 3, min_value=1)
+            max_times = self.cfg["poke_max_times"]
             try:
                 times = int(times)
             except (TypeError, ValueError):
                 times = 1
             times = max(1, min(times, max_times))
 
-            interval = self._cfg_float("poke_interval", 0.5, min_value=0)
+            interval = self.cfg["poke_interval"]
             success_count = 0
             last_err: str | None = None
             for i in range(times):
@@ -1128,7 +1189,7 @@ class LitePokePlugin(Star):
             return
 
         # scope 已在前面归一化为 str，供跟戳解释和引导 CD 共用。
-        guide_cd = self._cfg_float("guide_cd", 30, min_value=0)
+        guide_cd = self.cfg["guide_cd"]
         if time.time() - self._guide_last[scope] < guide_cd:
             return
         self._guide_last[scope] = time.time()
@@ -1146,9 +1207,9 @@ class LitePokePlugin(Star):
         只在 PokeLog 有累积时返回非空字符串。
         消费后清空 recent（避免重复注入）。
         """
-        window = self._cfg_int("poke_log_window", 60, min_value=1)
+        window = self.cfg["poke_log_window"]
         self._poke_log.prune_recent(time.time(), window)
-        keep_days = self._cfg_int("poke_log_daily_keep_days", 7, min_value=0)
+        keep_days = self.cfg["poke_log_daily_keep_days"]
         self._poke_log.prune_daily(keep_days)
 
         recent = self._poke_log.consume_recent()
@@ -1188,7 +1249,7 @@ class LitePokePlugin(Star):
     def _build_follow_trace_block(self, scope: str) -> str:
         """构造自动跟戳解释块，供下一次 LLM 请求理解刚才为什么跟戳。"""
         now = time.time()
-        window = self._cfg_int("follow_trace_ttl", 60, min_value=1)
+        window = self.cfg["follow_trace_ttl"]
         kept: deque[FollowPokeTrace] = deque(maxlen=20)
         matched: list[FollowPokeTrace] = []
 
@@ -1244,7 +1305,7 @@ class LitePokePlugin(Star):
             self._vibe[gid] = vibe
 
         now = time.time()
-        window = self._cfg_int("vibe_window", 60, min_value=1)
+        window = self.cfg["vibe_window"]
         vibe.recent_msgs.append(now)
         vibe.last_msg_sender = str(event.get_sender_id())
         vibe.prune(now, window)
@@ -1376,15 +1437,12 @@ class LitePokePlugin(Star):
         """
         now = time.time()
         self._poke_log.record(str(user_id), now)
-        self._poke_log.prune_recent(now, self._cfg_int("poke_log_window", 60, min_value=1))
+        self._poke_log.prune_recent(now, self.cfg["poke_log_window"])
         self._maybe_periodic_save()
 
         # 先构造并写入 poke 事件：respond_poked_cd 只控制是否主动调 LLM，
         # 不应阻止事件进入 conversation，否则 CD 期间的戳会在上下文里丢失。
-        try:
-            sender_name = event.get_sender_name() or "未知用户"
-        except Exception:
-            sender_name = "未知用户"
+        sender_name = event.get_sender_name() or "未知用户"
         poke_text = self._build_poke_event_text(
             {
                 "sender_id": str(user_id),
@@ -1427,7 +1485,7 @@ class LitePokePlugin(Star):
             return None
 
         # CD 控制：避免群友狂戳 bot 导致 LLM 调用刷屏
-        respond_cd = self._cfg_float("respond_poked_cd", 10, min_value=0)
+        respond_cd = self.cfg["respond_poked_cd"]
         elapsed = now - self._last_respond_poked.get(scope, 0.0)
         if elapsed < respond_cd:
             self._diagnose(
@@ -1440,10 +1498,7 @@ class LitePokePlugin(Star):
             )
             return None
 
-        # 概率控制
-        respond_prob = self._cfg_float(
-            "respond_poked_prob", 1.0, min_value=0.0, max_value=1.0
-        )
+        respond_prob = self.cfg["respond_poked_prob"]
         if respond_prob <= 0:
             self._diagnose(
                 "respond_poked",
@@ -1507,7 +1562,7 @@ class LitePokePlugin(Star):
             )
             return
 
-        prob = self._cfg_float("follow_prob", 0.1, min_value=0.0, max_value=1.0)
+        prob = self.cfg["follow_prob"]
         if prob <= 0:
             self._diagnose(
                 "follow_poke",
@@ -1520,7 +1575,7 @@ class LitePokePlugin(Star):
             return
 
         # CD 兜底：避免群内连续戳一戳事件时连续跟戳
-        follow_cd = self._cfg_float("follow_cd", 3, min_value=0)
+        follow_cd = self.cfg["follow_cd"]
         elapsed = time.time() - self._last_follow_poke.get(scope, 0.0)
         if elapsed < follow_cd:
             self._diagnose(
@@ -1570,12 +1625,11 @@ class LitePokePlugin(Star):
 
         now = time.time()
         self._last_follow_poke[scope] = now
-        # 记录到 vibe
         vibe = self._vibe.get(scope)
         if vibe is None:
             vibe = GroupVibe()
             self._vibe[scope] = vibe
-        window = self._cfg_int("vibe_window", 60, min_value=1)
+        window = self.cfg["vibe_window"]
         vibe.recent_pokes.append(now)
         vibe.prune(now, window)
         self._follow_traces.append(
@@ -1618,7 +1672,7 @@ class LitePokePlugin(Star):
         if vibe is None:
             return base_prob, "no_vibe"
 
-        window = self._cfg_int("vibe_window", 60, min_value=1)
+        window = self.cfg["vibe_window"]
         now = time.time()
         vibe.prune(now, window)
 
@@ -1627,10 +1681,10 @@ class LitePokePlugin(Star):
         poke_count = len(vibe.recent_pokes)
         reason_parts: list[str] = []
 
-        active_threshold = self._cfg_int("vibe_active_threshold", 5, min_value=0)
-        quiet_threshold = self._cfg_int("vibe_quiet_threshold", 1, min_value=0)
+        active_threshold = self.cfg["vibe_active_threshold"]
+        quiet_threshold = self.cfg["vibe_quiet_threshold"]
         # 0 会让规则 1 恒成立（等于静默关闭跟戳），跟戳开关请用 follow_enabled。
-        max_in_window = self._cfg_int("vibe_max_in_window", 1, min_value=1)
+        max_in_window = self.cfg["vibe_max_in_window"]
 
         # 规则 1：窗口内跟戳次数已达上限 → 跳过
         if poke_count >= max_in_window:

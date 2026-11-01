@@ -45,14 +45,6 @@ def _install_astrbot_stubs() -> None:
         def mark_as_temp(self):
             return self
 
-    class MessageChain:
-        def __init__(self, chain=None):
-            self.chain = list(chain or [])
-
-    class Plain:
-        def __init__(self, text: str = ""):
-            self.text = text
-
     class AiocqhttpMessageEvent:
         pass
 
@@ -105,13 +97,6 @@ def _install_astrbot_stubs() -> None:
     astrbot.core.config.astrbot_config = mod("astrbot.core.config.astrbot_config", AstrBotConfig=dict)
     astrbot.core.agent = mod("astrbot.core.agent")
     astrbot.core.agent.message = mod("astrbot.core.agent.message", TextPart=TextPart)
-    astrbot.core.message = mod("astrbot.core.message")
-    astrbot.core.message.components = mod(
-        "astrbot.core.message.components", Plain=Plain
-    )
-    astrbot.core.message.message_event_result = mod(
-        "astrbot.core.message.message_event_result", MessageChain=MessageChain
-    )
     astrbot.core.platform = mod("astrbot.core.platform")
     astrbot.core.platform.sources = mod("astrbot.core.platform.sources")
     astrbot.core.platform.sources.aiocqhttp = mod("astrbot.core.platform.sources.aiocqhttp")
@@ -215,6 +200,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(plugin._cfg_int("num", 1, min_value=1, max_value=3), 3)
         plugin = make_plugin(num=0)
         self.assertEqual(plugin._cfg_int("num", 1, min_value=1, max_value=3), 1)
+
+
+class ConfigNormalizationTests(unittest.TestCase):
+    def test_invalid_non_numeric_types_fall_back(self):
+        plugin = make_plugin(
+            only_group="false",
+            trigger_keywords="笨蛋",
+            respond_poked_prompt=123,
+            debug_diagnostics="yes",
+            follow_enabled=None,
+        )
+        self.assertNotIn("only_group", plugin.cfg)
+        self.assertNotIn("trigger_keywords", plugin.cfg)
+        self.assertNotIn("respond_poked_prompt", plugin.cfg)
+        self.assertNotIn("debug_diagnostics", plugin.cfg)
+        self.assertNotIn("follow_enabled", plugin.cfg)
 
 
 class ConfigFlattenTests(unittest.TestCase):
@@ -331,11 +332,6 @@ class PokeEventTextTests(unittest.TestCase):
         text = main.LitePokePlugin._build_poke_event_text({"sender_id": "1", "target_id": "2"})
         self.assertIn("未知用户(ID:1)", text)
         self.assertIn("未知用户(ID:2)", text)
-
-    def test_empty_input(self):
-        self.assertEqual(main.LitePokePlugin._build_poke_event_text(None), "")
-        self.assertEqual(main.LitePokePlugin._build_poke_event_text({}), "")
-        self.assertEqual(main.LitePokePlugin._build_poke_event_text("oops"), "")
 
 
 class RawPokeHistoryTests(unittest.TestCase):
@@ -517,11 +513,11 @@ class VibeAdjustTests(unittest.TestCase):
 
     def test_max_in_window_zero_is_clamped_to_one(self):
         now = time.time()
-        self.plugin.cfg["vibe_max_in_window"] = 0
+        plugin = make_plugin(vibe_max_in_window=0)
         vibe = main.GroupVibe()
         vibe.recent_pokes.append(now)
-        self.plugin._vibe["g"] = vibe
-        prob, reason = self.plugin._vibe_adjust("g", "1", 0.2)
+        plugin._vibe["g"] = vibe
+        prob, reason = plugin._vibe_adjust("g", "1", 0.2)
         self.assertEqual(prob, 0.0)
         self.assertIn("max_in_window", reason)
 
