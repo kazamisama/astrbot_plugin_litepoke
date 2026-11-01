@@ -304,8 +304,11 @@ astrbot_plugin_litepoke/
 ├── CHANGELOG.md         # 版本变更记录
 ├── tests/               # 单元测试（stdlib unittest，无需安装 AstrBot）
 ├── LICENSE              # AGPL-3.0
+├── .gitattributes       # 发布包排除 tests/ 等开发文件
 └── .gitignore
 ```
+
+> `.gitattributes` 通过 `export-ignore` 让基于 `git archive` 的发布包排除测试与开发文件；Cloud 市场包是否遵守该规则，以发布后下载的 zip 为准。仓库直装仍会拿到 `tests/`。
 
 数据目录（运行时自动创建）：
 

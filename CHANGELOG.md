@@ -11,6 +11,7 @@ litepoke 的所有版本变更记录。格式参考 [Keep a Changelog](https://k
 - README 增加「开发与测试」一节，测试与编译检查命令从「文件结构」移入该节。
 - 说明 `trigger_keywords` 在直接构造插件时使用空列表兜底；生产环境由 AstrBot 按 schema 补默认值。
 - 版本演进图补到 v1.6.x，并注明 v1.6 移除 direct 直发。
+- 新增 `.gitattributes`：让基于 `git archive` 的发布包排除 `tests/`、`.gitignore` 与自身；Cloud 包是否生效以发布后 zip 为准。
 - `metadata.yaml` version：v1.6.2 → v1.6.3
 
 ### Tests
